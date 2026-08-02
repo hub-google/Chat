@@ -132,11 +132,21 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   useEffect(() => {
     void (async () => {
       try {
-        const user = await ensureUser();
-        const { data, error } = await supabase.from('profiles').select('role').eq('id', user.id).single();
-        if (error || data?.role !== 'admin') {
-          setAuthState('denied');
-          return;
+        await ensureUser();
+        const { data: alreadyAdmin, error: adminCheckError } = await supabase.rpc('is_admin');
+        if (adminCheckError) throw adminCheckError;
+
+        if (!alreadyAdmin) {
+          const password = window.prompt('請輸入管理員密碼：');
+          if (!password) { setAuthState('denied'); return; }
+
+          const { data: verified, error: verifyError } = await supabase.rpc('verify_admin_password', { p_password: password });
+          if (verifyError) throw verifyError;
+          if (!verified) {
+            setErrorMsg('管理員密碼錯誤。');
+            setAuthState('denied');
+            return;
+          }
         }
         setAuthState('allowed');
       } catch (error) {

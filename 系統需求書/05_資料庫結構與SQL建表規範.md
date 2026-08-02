@@ -236,7 +236,7 @@
 2. **`fn_match_user(p_user_id, p_intent, p_gender, p_target_gender, p_city, p_age, p_lat, p_lng, p_max_distance_km, p_distance_mode)`**：高併發 RPC 配對預寫程序。支援距離計算與極端距離(最遠)篩選。使用 `SELECT FOR UPDATE SKIP LOCKED` 原子配對，於 10ms 內完成鎖定、匹配、建立 `matches` 紀錄並刪除配對池紀錄，避免連線數爆滿。
 3. **`admin_takeover_session(p_match_id, p_target_user_id, p_reason)`**：管理員接管預寫程序，執行 `is_taken_over = TRUE` 標記、紀錄 `takeover_at` 時間戳、寫入 `admin_takeovers` 稽核日誌與中斷原用戶寫入權限。
 4. **`terminate_match_by_admin(p_match_id, p_reason)`**：管理員緊急強制斷線程序，將 `matches.is_active` 改為 `FALSE`，發送系統斷線通知。
-5. **管理員授權**：不得提供公開的權限提升 RPC。管理員角色只能由資料庫擁有者在受信任的 Supabase SQL Editor，或其他受保護的服務端管理流程中授予。
+5. **`verify_admin_password(p_password)`**：在資料庫內部核對 `private.admin_config` 保存的 bcrypt hash。呼叫端不能讀取密碼表；成功後取得 8 小時管理權限，並受失敗次數限制。
 
 ## 六、正式資料與 Seed 規範（2026-08 修訂）
 

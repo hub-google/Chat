@@ -8,6 +8,25 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- 管理員密碼設定只存在私有 schema，API 角色不可直接讀取。
+CREATE SCHEMA IF NOT EXISTS private;
+REVOKE ALL ON SCHEMA private FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS private.admin_config (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    password_hash TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS private.admin_login_attempts (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id UUID NOT NULL,
+    succeeded BOOLEAN NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+REVOKE ALL ON ALL TABLES IN SCHEMA private FROM PUBLIC, anon, authenticated;
+
 -- ========================================================
 -- 1. 建立資料表 (TABLES)
 -- ========================================================
@@ -30,10 +49,13 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     last_ip_location_zh VARCHAR(255),
     reputation_score INTEGER DEFAULT 100 CHECK (reputation_score >= 0 AND reputation_score <= 100),
     role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+    admin_until TIMESTAMPTZ,
     status VARCHAR(20) DEFAULT 'offline' CHECK (status IN ('online', 'matching', 'chatting', 'offline', 'banned')),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS admin_until TIMESTAMPTZ;
 
 -- 1.2 即時配對池表 (matching_pool)
 CREATE TABLE IF NOT EXISTS public.matching_pool (
@@ -205,7 +227,9 @@ RETURNS BOOLEAN AS $$
 BEGIN
     RETURN EXISTS (
         SELECT 1 FROM public.profiles 
-        WHERE id = auth.uid() AND role = 'admin'
+        WHERE id = auth.uid()
+          AND role = 'admin'
+          AND (admin_until IS NULL OR admin_until > NOW())
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
@@ -221,10 +245,52 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 
--- 輔助 Function：透過密碼升級為管理員
--- 管理員不得由瀏覽器端透過共用密碼自行升級。
--- 此 DROP 也會移除舊版曾部署的 claim_admin_role RPC。
+-- 移除舊版明文密碼權限提升 RPC。
 DROP FUNCTION IF EXISTS public.claim_admin_role(TEXT);
+
+-- 密碼只在資料庫內部以 bcrypt hash 驗證，不會回傳給瀏覽器。
+CREATE OR REPLACE FUNCTION public.verify_admin_password(p_password TEXT)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_password_hash TEXT;
+    v_failed_attempts INTEGER;
+BEGIN
+    IF auth.uid() IS NULL OR p_password IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT COUNT(*) INTO v_failed_attempts
+    FROM private.admin_login_attempts
+    WHERE user_id = auth.uid()
+      AND succeeded = FALSE
+      AND attempted_at > NOW() - INTERVAL '15 minutes';
+
+    IF v_failed_attempts >= 5 THEN
+        RAISE EXCEPTION 'Too many failed attempts. Try again in 15 minutes.';
+    END IF;
+
+    SELECT password_hash INTO v_password_hash
+    FROM private.admin_config
+    WHERE id = 1;
+
+    IF v_password_hash IS NOT NULL
+       AND v_password_hash = crypt(p_password, v_password_hash) THEN
+        INSERT INTO private.admin_login_attempts (user_id, succeeded)
+        VALUES (auth.uid(), TRUE);
+
+        UPDATE public.profiles
+        SET role = 'admin', admin_until = NOW() + INTERVAL '8 hours'
+        WHERE id = auth.uid();
+
+        RETURN TRUE;
+    END IF;
+
+    INSERT INTO private.admin_login_attempts (user_id, succeeded)
+    VALUES (auth.uid(), FALSE);
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, private, extensions;
 
 -- Anonymous Auth 建立帳號後立即補齊 profile，避免配對池與訊息 FK 寫入失敗。
 CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
@@ -636,6 +702,8 @@ GRANT EXECUTE ON FUNCTION public.admin_takeover_session(UUID, UUID, TEXT) TO aut
 REVOKE ALL ON FUNCTION public.terminate_match_by_admin(UUID, TEXT) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.terminate_match_by_admin(UUID, TEXT) TO authenticated;
 REVOKE ALL ON FUNCTION public.clean_zombie_matching_pool() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.verify_admin_password(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.verify_admin_password(TEXT) TO authenticated;
 
 -- 4.3 每日 04:00 軟刪除 7 天過期訊息物理清理程序
 CREATE OR REPLACE FUNCTION public.purge_archived_messages()
