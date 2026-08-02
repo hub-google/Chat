@@ -1,0 +1,16 @@
+{
+  "name": "Tunnel - 匿名聊天室",
+  "short_name": "Tunnel",
+  "description": "純粹匿名，拋開標籤，找回對話的本質。",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#3b82f6",
+  "icons": [
+    {
+      "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/85/Circle-icons-chat.svg/512px-Circle-icons-chat.svg.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

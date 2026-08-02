@@ -1,0 +1,30 @@
+name: Database Backup & Cleanup
+
+on:
+  schedule:
+    # Runs at 00:00 and 04:00 UTC every day
+    - cron: '0 0,4 * * *'
+  workflow_dispatch: # Allows manual trigger from the Actions tab
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install @supabase/supabase-js googleapis
+
+      - name: Run backup script
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: node scripts/backup.js
