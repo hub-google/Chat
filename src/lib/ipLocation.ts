@@ -27,7 +27,7 @@ export async function getIpLocation(signal?: AbortSignal): Promise<IpLocation | 
   try {
     const response = await fetch(
       'https://ipwho.is/?lang=zh-CN&fields=success,ip,country,region,city,latitude,longitude',
-      { signal, cache: 'no-store' },
+      { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(4000)]) : AbortSignal.timeout(4000), cache: 'no-store' },
     );
     if (!response.ok) return null;
 

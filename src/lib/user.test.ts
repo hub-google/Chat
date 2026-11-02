@@ -5,6 +5,7 @@ import { supabase } from './supabase';
 vi.mock('./supabase', () => ({
   assertSupabaseConfigured: vi.fn(),
   supabase: {
+    from: vi.fn().mockReturnValue({ upsert: vi.fn().mockResolvedValue({ error: null }) }),
     auth: {
       getUser: vi.fn(),
       getSession: vi.fn(),
@@ -24,6 +25,9 @@ describe('ensureUser', () => {
     } as never);
 
     await expect(ensureUser()).resolves.toMatchObject({ id: 'existing-user' });
+    expect(supabase.from('profiles').upsert).toHaveBeenCalledWith(
+      { id: 'existing-user' }, { onConflict: 'id', ignoreDuplicates: true },
+    );
     expect(supabase.auth.signInAnonymously).not.toHaveBeenCalled();
   });
 

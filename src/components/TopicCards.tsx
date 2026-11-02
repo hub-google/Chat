@@ -57,7 +57,7 @@ export function TopicCards({ onSelectTopic, onClose }: TopicCardsProps) {
       setDrawnTopic('這個分類還沒有話題卡喔！');
       return;
     }
-    const randomCard = categoryCards[Math.floor(Math.random() * categoryCards.length)];
+    const randomCard = categoryCards[crypto.getRandomValues(new Uint32Array(1))[0] % categoryCards.length];
     setDrawnTopic(randomCard.content);
   };
 

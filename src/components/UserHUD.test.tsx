@@ -24,9 +24,12 @@ vi.mock('../lib/supabase', () => ({
     }),
     removeChannel: vi.fn(),
     from: vi.fn().mockReturnValue({
+      upsert: vi.fn().mockResolvedValue({ error: null }),
+      select: vi.fn().mockReturnThis(),
       update: vi.fn().mockReturnThis(),
       delete: vi.fn().mockReturnThis(),
-      eq: vi.fn().mockResolvedValue({}),
+      eq: vi.fn().mockReturnThis(),
+      single: vi.fn().mockResolvedValue({ data: null, error: null }),
     }),
   },
 }));
@@ -35,6 +38,7 @@ vi.mock('../lib/supabase', () => ({
 vi.mock('../lib/fingerprint', () => ({
   generateDeviceFingerprint: vi.fn(),
 }));
+vi.mock('../lib/ipLocation', () => ({ getIpLocation: vi.fn().mockResolvedValue(null) }));
 
 // Mock Geolocation
 const mockGeolocation = {
@@ -134,7 +138,7 @@ describe('UserHUD', () => {
     
     // 2. Wait for loading state (getting location)
     await waitFor(() => {
-      expect(screen.getByText('獲取定位與安全指紋中...')).toBeInTheDocument();
+      expect(mockGeolocation.getCurrentPosition).toHaveBeenCalled();
     });
 
     // 3. Click Cancel while geo is pending

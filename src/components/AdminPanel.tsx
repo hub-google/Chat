@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { startTransition, useEffect, useMemo, useState } from 'react';
 import {
   Activity, AlertTriangle, BarChart3, ChevronRight, Eye, Flag,
   MessageCircle, RefreshCw, Send, ShieldCheck, StopCircle, UserRound, X,
@@ -9,6 +9,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { ensureUser } from '../lib/user';
 import styles from './AdminPanel.module.css';
+import { useActionDialog } from './useActionDialog';
 
 type AdminView = 'sessions' | 'reports' | 'analytics';
 type AnalyticsRange = 'today' | '7d' | '30d' | 'all';
@@ -63,11 +64,14 @@ const shortId = (id?: string | null) => id ? id.slice(0, 8) : '—';
 const dateTime = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-TW', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—';
 
 export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
+  const { ask, dialog } = useActionDialog();
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [reports, setReports] = useState<Report[]>([]);
   const [stats, setStats] = useState({ totalMatches: 0, activeUsers: 0, totalReports: 0 });
-  const [authState, setAuthState] = useState<'checking' | 'allowed' | 'denied'>('checking');
+  const [authState, setAuthState] = useState<'checking' | 'login' | 'allowed' | 'denied'>('checking');
+  const [password, setPassword] = useState('');
+  const [signingIn, setSigningIn] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
@@ -137,16 +141,8 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
         if (adminCheckError) throw adminCheckError;
 
         if (!alreadyAdmin) {
-          const password = window.prompt('請輸入管理員密碼：');
-          if (!password) { setAuthState('denied'); return; }
-
-          const { data: verified, error: verifyError } = await supabase.rpc('verify_admin_password', { p_password: password });
-          if (verifyError) throw verifyError;
-          if (!verified) {
-            setErrorMsg('管理員密碼錯誤。');
-            setAuthState('denied');
-            return;
-          }
+          setAuthState('login');
+          return;
         }
         setAuthState('allowed');
       } catch (error) {
@@ -156,18 +152,37 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
     })();
   }, []);
 
-  useEffect(() => { if (authState === 'allowed') void refresh(); }, [authState, view]); // eslint-disable-line react-hooks/exhaustive-deps
+  async function signIn(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (signingIn || !password.trim()) return;
+    setSigningIn(true);
+    setErrorMsg('');
+    try {
+      await ensureUser();
+      const { data, error } = await supabase.rpc('verify_admin_password', { p_password: password });
+      if (error) throw new Error(error.message);
+      if (!data) throw new Error('管理員密碼錯誤，請重新輸入。');
+      setPassword('');
+      setAuthState('allowed');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : '管理員驗證失敗，請稍後再試。');
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
+  useEffect(() => { if (authState === 'allowed') startTransition(() => { void refresh(); }); }, [authState, view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (authState !== 'allowed') return;
     const currentCount = Number(document.documentElement.dataset.onlineCount ?? 0);
-    setStats((previous) => ({ ...previous, activeUsers: currentCount }));
+    startTransition(() => setStats((previous) => ({ ...previous, activeUsers: currentCount })));
     const updateCount = (event: Event) => setStats((previous) => ({ ...previous, activeUsers: (event as CustomEvent<number>).detail }));
     window.addEventListener('site-online-count', updateCount);
     return () => window.removeEventListener('site-online-count', updateCount);
   }, [authState]);
 
-  useEffect(() => { if (authState === 'allowed' && view === 'analytics') void fetchAnalytics(); }, [analyticsRange]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (authState === 'allowed' && view === 'analytics') startTransition(() => { void fetchAnalytics(); }); }, [analyticsRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!monitorMatchId) return;
@@ -181,14 +196,14 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   }, [monitorMatchId]);
 
   async function terminateSession(matchId: string) {
-    const reason = window.prompt('請輸入終止原因：');
+    const reason = await ask('終止此聊天室', true);
     if (!reason) return;
     const { error } = await supabase.rpc('terminate_match_by_admin', { p_match_id: matchId, p_reason: reason });
     if (error) setErrorMsg(error.message); else await fetchSessions();
   }
 
   async function handleTakeover(matchId: string, targetUserId: string) {
-    const reason = window.prompt('請輸入接管原因：');
+    const reason = await ask('接管此聊天室', true);
     if (!reason) return;
     const { error } = await supabase.rpc('admin_takeover_session', { p_match_id: matchId, p_target_user_id: targetUserId, p_reason: reason });
     if (error) setErrorMsg(error.message); else {
@@ -211,7 +226,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   }
 
   async function banUser(userId: string) {
-    if (!window.confirm('確定要封鎖此使用者嗎？')) return;
+    if (!await ask('確定要封鎖此使用者嗎？')) return;
     const { error } = await supabase.from('profiles').update({ status: 'banned' }).eq('id', userId);
     if (error) setErrorMsg(error.message); else await fetchReports();
   }
@@ -222,12 +237,13 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   }
 
   if (authState !== 'allowed') {
-    return <div className={styles.auth}><ShieldCheck size={52} /><h1>{authState === 'checking' ? '正在驗證管理員身分' : '無法進入管理後台'}</h1><p>{errorMsg || '密碼錯誤或已取消輸入。'}</p></div>;
+    return <div className={styles.auth}><ShieldCheck size={52} /><h1>{authState === 'checking' ? '正在驗證管理員身分' : '管理員登入'}</h1>{authState !== 'checking' && <form onSubmit={signIn} className={styles.loginForm}><label htmlFor="admin-password">管理員密碼</label><input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required disabled={signingIn} /><button type="submit" disabled={signingIn}>{signingIn ? '驗證中…' : '登入管理後台'}</button><Link href="/">返回聊天室</Link></form>}{errorMsg && <p role="alert">{errorMsg}</p>}</div>;
   }
 
   const meta = viewMeta[view];
   return (
     <div className={styles.shell}>
+      {dialog}
       <aside className={styles.sidebar}>
         <div className={styles.brand}><span className={styles.logo}><ShieldCheck size={21} /></span><div><strong>Chat 管理中心</strong><small>營運控制台</small></div></div>
         <nav className={styles.nav} aria-label="管理中心導覽">

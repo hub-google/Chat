@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { startTransition, useState, useEffect, useRef, useCallback } from 'react';
 import { useMatchStore } from '../store/matchStore';
 import { WebRTCManager } from '../lib/webrtc';
 import { supabase } from '../lib/supabase';
@@ -10,6 +10,7 @@ import { saveToIDB, getAllFromIDB, deleteFromIDB } from '../lib/idb';
 import { env } from '../lib/env';
 import { getUserId } from '../lib/user';
 import Image from 'next/image';
+import { useActionDialog } from './useActionDialog';
 
 interface Message {
   id: string;
@@ -22,6 +23,7 @@ interface Message {
 }
 
 export function ChatWindow() {
+  const { ask, dialog } = useActionDialog();
   const { matchId, status, reset, openingMessage } = useMatchStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -63,13 +65,16 @@ export function ChatWindow() {
   // Reset state when a new match starts
   useEffect(() => {
     if (matchId) {
+      startTransition(() => {
       setMessages([]);
       setPeerLeft(false);
       setConnectionState('connecting');
       setNotice('');
       setPeerProfile(null);
+      setPeerDistanceKm(null);
       takeoverRole.current = null;
       openingMessageSent.current = false;
+      });
     }
   }, [matchId]);
 
@@ -99,7 +104,7 @@ export function ChatWindow() {
       for (const msg of failed) {
         if (msg.match_id === matchId) {
           const { error } = await supabase.from('messages').insert(msg);
-          if (!error) {
+          if (!error || error.code === '23505') {
             await deleteFromIDB(msg.id);
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'saved', error: undefined } : m));
           }
@@ -112,7 +117,7 @@ export function ChatWindow() {
 
   useEffect(() => {
     if (connectionState === 'p2p' || connectionState === 'fallback') {
-      setShowSuccessMsg(true);
+      startTransition(() => setShowSuccessMsg(true));
       const timer = setTimeout(() => setShowSuccessMsg(false), 10000);
       
       if (matchId && openingMessage && !openingMessageSent.current) {
@@ -167,8 +172,8 @@ export function ChatWindow() {
            setPeerDistanceKm(typeof matchData.distance_km === 'number' ? matchData.distance_km : null);
            const peerId = matchData.participants.find((p: string) => p !== userId);
            if (peerId) {
-             const { data: profile } = await supabase.from('profiles').select('gender, age, city, bio').eq('id', peerId).single();
-             if (profile) setPeerProfile(profile);
+             const { data: profiles } = await supabase.rpc('get_peer_profile', { p_match_id: matchId });
+             if (profiles?.[0]) setPeerProfile(profiles[0]);
            }
         }
       };
@@ -189,7 +194,7 @@ export function ChatWindow() {
   }, [messages]);
 
   const handleLeave = useCallback(async (force = false) => {
-    if (!force && !window.confirm('確定要離開聊天室嗎？')) return;
+    if (!force && !await ask('確定要離開聊天室嗎？')) return;
     
     rtcManager.current?.sendMessage({ type: 'leave' });
     
@@ -202,7 +207,7 @@ export function ChatWindow() {
       }
       reset();
     }, 500);
-  }, [matchId, reset]);
+  }, [matchId, reset, ask]);
 
   useEffect(() => {
     if (status === 'chatting' && matchId) {
@@ -249,7 +254,7 @@ export function ChatWindow() {
              setMessages(prev => prev.map(m => m.id === msg.id && m.status !== 'saved' ? { ...m, status: 'delivered' } : m));
           } else if (msg.type === 'chat') {
              if (takeoverRole.current === 'target') return;
-             setMessages((prev) => [...prev, { ...msg.message, sender: 'peer' }]);
+             setMessages((prev) => prev.some(item => item.id === msg.message.id) ? prev : [...prev, { ...msg.message, sender: 'peer' }]);
              rtcManager.current?.sendMessage({ type: 'ack', id: msg.message.id });
            }
          }, (state) => setConnectionState(state === 'open' ? 'p2p' : 'fallback'));
@@ -277,19 +282,20 @@ export function ChatWindow() {
           .select('id,sender_id,content,type,created_at')
           .eq('match_id', matchId)
           .lte('created_at', isTakeoverTarget && currentMatch?.takeover_at ? currentMatch.takeover_at : new Date().toISOString())
-          .order('created_at', { ascending: true })
+          .order('created_at', { ascending: false })
           .limit(100);
           if (error) {
             setNotice(`載入歷史訊息失敗：${error.message}`);
             return;
           }
-          setMessages((data ?? []).filter((row) => !(row.type === 'system' && row.content?.includes('備用安全通道'))).map((row) => ({
+          const history: Message[] = (data ?? []).reverse().filter((row) => !(row.type === 'system' && row.content?.includes('備用安全通道'))).map((row) => ({
             id: row.id,
             sender: row.sender_id === userId ? 'me' : row.type === 'system' ? 'system' : 'peer',
             ...(row.type === 'image' ? { imageUrl: row.content } : { text: row.content }),
             timestamp: new Date(row.created_at).getTime(),
             status: row.sender_id === userId ? 'saved' : undefined,
-          })));
+          }));
+          setMessages(previous => [...new Map([...history, ...previous].map(message => [message.id, message])).values()]);
       }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : '無法確認使用者身分'));
 
       const channel = supabase.channel(`match_db_${matchId}`)
@@ -396,7 +402,7 @@ export function ChatWindow() {
     
     if (error) {
       if (error.code === '42501' || error.message.includes('policy')) {
-        setMessages(prev => prev.map(item => item.id === msg.id ? { ...item, status: 'saved' } : item));
+        setMessages(prev => prev.map(item => item.id === msg.id ? { ...item, status: 'failed', error: '沒有儲存權限，訊息未寫入資料庫' } : item));
         return;
       }
       
@@ -451,13 +457,6 @@ export function ChatWindow() {
     const sensitiveWords = /匯款|點數|投資|買賣|詐騙|援交/;
     if (sensitiveWords.test(text)) {
       setNotice('系統警示：系統偵測到敏感字詞，請注意不要匯款或提供個人資料，防範詐騙！');
-      void supabase.from('chat_reports').insert({
-        reporter_id: 'system',
-        target_id: myUserId.current,
-        match_id: matchId,
-        reason: 'system_alert',
-        details: 'System detected sensitive words: ' + text,
-      });
     }
 
     // 防範連點發送訊息的 Race Condition
@@ -469,7 +468,7 @@ export function ChatWindow() {
       id: crypto.randomUUID(),
       sender: 'me',
       text: text,
-      timestamp: 0,
+      timestamp: Date.now(),
       status: 'sent'
     };
     setMessages((prev) => [...prev, newMsg]);
@@ -535,7 +534,7 @@ export function ChatWindow() {
           id: crypto.randomUUID(),
           sender: 'me',
           imageUrl: data.data.url,
-          timestamp: 0,
+          timestamp: Date.now(),
           status: 'sent'
         };
         setMessages((prev) => [...prev, newMsg]);
@@ -554,6 +553,7 @@ export function ChatWindow() {
 
   return (
     <div className="chat-shell" style={{ display: 'flex', flexDirection: 'column', height: '100vh', maxWidth: '600px', margin: '0 auto', background: 'var(--color-surface-light)', position: 'relative' }}>
+      {dialog}
       <div className="chat-topbar" onDoubleClick={() => setPanicMode(true)} style={{ padding: '16px', background: 'var(--gradient-primary)', color: 'white', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
           <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--color-success)', opacity: connectionState === 'connecting' ? 0.5 : 1 }} />
           <span style={{ fontWeight: 500 }}>
@@ -569,12 +569,12 @@ export function ChatWindow() {
               peerProfile.gender === 'male' ? '男生' : peerProfile.gender === 'female' ? '女生' : null,
               peerProfile.age ? `${peerProfile.age} 歲` : null,
               peerProfile.city,
-              peerDistanceKm === null ? '距離無法估算' : `距離約 ${peerDistanceKm < 1 ? '< 1' : peerDistanceKm.toFixed(1)} km`
+              peerDistanceKm === null ? '距離未提供（其中一方未取得定位）' : `距離約 ${peerDistanceKm < 1 ? '< 1' : peerDistanceKm.toFixed(1)} km`
             ].filter(Boolean).map((item, i) => (
               <span key={i} style={{ background: '#eff6ff', color: 'var(--color-primary)', padding: '4px 12px', borderRadius: '16px', fontSize: '13px', fontWeight: 500 }}>{item}</span>
             ))}
             </div>
-            {peerProfile.bio && <div style={{ fontSize: '14px', color: 'var(--text-primary)', marginTop: '4px', background: '#f8fafc', padding: '10px', borderRadius: '8px', borderLeft: '3px solid var(--color-primary)' }}>"{peerProfile.bio}"</div>}
+            {peerProfile.bio && <div style={{ fontSize: '14px', color: 'var(--text-primary)', marginTop: '4px', background: '#f8fafc', padding: '10px', borderRadius: '8px', borderLeft: '3px solid var(--color-primary)' }}>「{peerProfile.bio}」</div>}
           </div>
         )}
 

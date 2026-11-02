@@ -19,7 +19,6 @@ export function UserHUD() {
   
   const pingInterval = useRef<NodeJS.Timeout | null>(null);
   const userIdRef = useRef<string | null>(null);
-  const matchingStartedAt = useRef(0);
   const matchingParams = useRef<{
     userId: string;
     intent: string;
@@ -132,12 +131,8 @@ export function UserHUD() {
            const params = matchingParams.current;
            if (params && !matchingAttemptRunning.current) {
              matchingAttemptRunning.current = true;
-             const elapsed = Date.now() - matchingStartedAt.current;
-             const isUnlimited = elapsed >= 30000 || params.distanceMode === 'unlimited';
-             const effectiveMode = isUnlimited ? 'unlimited' : params.distanceMode;
-             const effectiveKm = isUnlimited || params.distanceMode === 'farthest'
-               ? null
-               : elapsed >= 10000 ? params.distanceKm * 2 : params.distanceKm;
+             const effectiveMode = params.distanceMode;
+             const effectiveKm = params.distanceMode === 'unlimited' || params.distanceMode === 'farthest' ? null : params.distanceKm;
              const { data, error } = await supabase.rpc('fn_match_user', {
                p_user_id: params.userId,
                p_intent: params.intent,
@@ -220,6 +215,14 @@ export function UserHUD() {
         console.warn('Geolocation permission unavailable; using approximate IP location');
       }
 
+      // Send only approximate coordinates to matching and profile storage.
+      lat = lat === null ? null : Number(lat.toFixed(2));
+      lng = lng === null ? null : Number(lng.toFixed(2));
+      const hasLocation = lat !== null && lng !== null;
+      if (!hasLocation && distanceMode !== 'unlimited') {
+        throw new Error('未取得定位，無法依距離配對。請允許瀏覽器定位，或將距離設定改為「不限」。');
+      }
+
       // 防禦性檢查：如果使用者在取得定位期間按下了「取消搜尋」，則終止後續配對流程
       if (useMatchStore.getState().status !== 'waiting') {
         return;
@@ -250,9 +253,8 @@ export function UserHUD() {
       // Only throttle requests that actually reached the matching operation.
       // Authentication/geolocation setup failures should remain immediately retryable.
       localStorage.setItem('last_match_time', Date.now().toString());
-      matchingStartedAt.current = Date.now();
       matchingParams.current = { userId, intent, lat, lng, distanceMode, distanceKm };
-      setLoadingMsg(preciseLocationGranted ? '尋找配對中...' : '使用大略位置尋找配對中...');
+      setLoadingMsg(!hasLocation ? '未取得定位，正在不限距離配對…' : preciseLocationGranted ? '尋找配對中...' : '使用大略位置尋找配對中...');
       
       const { data, error } = await supabase.rpc('fn_match_user', {
         p_user_id: userId,
@@ -269,6 +271,11 @@ export function UserHUD() {
       }
 
       const matchData = data?.[0];
+      if (useMatchStore.getState().status !== 'waiting') {
+        if (matchData?.match_id) await supabase.rpc('leave_match', { p_match_id: matchData.match_id });
+        else await supabase.from('matching_pool').delete().eq('user_id', userId);
+        return;
+      }
       if (matchData && matchData.match_id) {
         setMatch(matchData.match_id); // Instant match!
       }

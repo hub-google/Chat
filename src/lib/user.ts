@@ -33,11 +33,11 @@ export async function ensureUser(): Promise<User> {
 
       // Ensure the profile row exists to prevent foreign key errors during matching
       const { error: upsertError } = await supabase.from('profiles').upsert(
-        { id: currentUser.id, status: 'online' },
-        { onConflict: 'id' }
+        { id: currentUser.id },
+        { onConflict: 'id', ignoreDuplicates: true }
       );
       if (upsertError) {
-        console.warn('Profile upsert failed (might not be an issue if RLS is tight):', upsertError);
+        throw new Error(`無法初始化使用者資料：${upsertError.message}`);
       }
 
       return currentUser;
