@@ -44,3 +44,5 @@ npx vitest run
 距離由雙方的約略座標計算。沒有定位時只允許「不限」配對；有限距離不會因等待時間而自動放寬。任一方未提供座標時顯示原因，不會編造公里數。IP 定位可能因 VPN 或服務狀況失準。
 
 如需驗證正式資料庫，可在可信任環境執行 `node --env-file=.env scripts/smoke_chat.mjs`。此腳本建立三個臨時帳號，測試距離篩選、資料隔離、訊息與離開，再清理本次測試建立的資料；需要本機的 service role key，請勿把 `.env` 提交或上傳。
+
+Google Drive 備份需要 repository secrets：`SUPABASE_SERVICE_KEY`、`GDRIVE_CREDENTIALS`（服務帳戶 JSON）、`GDRIVE_FOLDER_ID`，且目標資料夾須允許服務帳戶寫入。缺少任一項時停止，不刪除資料；只有雲端回傳大小與 checksum 符合的 500 筆以內訊息才會清除，聊天室紀錄保留以避免串聯刪除未備份的新訊息。

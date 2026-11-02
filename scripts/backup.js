@@ -20,7 +20,6 @@ async function runBackup() {
   try {
     // 1. Fetch old messages (older than 24 hours for backup, 7 days for hard delete)
     const backupThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const hardDeleteThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: messagesToBackup, error: fetchErr } = await supabase
       .from('messages')
@@ -80,10 +79,8 @@ async function runBackup() {
       if (deleteError) throw deleteError;
     }
 
-    // Also cleanup inactive matches older than 7 days
-    console.log('Cleaning up old matches...');
-    const { error: cleanupError } = await supabase.from('matches').delete().eq('is_active', false).lt('created_at', hardDeleteThreshold);
-    if (cleanupError) throw cleanupError;
+    // Retain rooms: deleting a room can cascade into newer, unbacked messages.
+    // This job deletes only the exact message IDs verified in the Drive upload.
 
     console.log('Backup and cleanup complete!');
   } catch (err) {
