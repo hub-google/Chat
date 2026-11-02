@@ -6,7 +6,7 @@ import { OnlinePresence } from '../components/OnlinePresence';
 export const metadata: Metadata = {
   title: 'Tunnel - Anonymous Chat',
   description: 'A highly performant anonymous chatting experience.',
-  manifest: '/manifest.json',
+  manifest: `${process.env.NEXT_PUBLIC_BASE_PATH || ''}/manifest.json`,
 };
 
 export default function RootLayout({

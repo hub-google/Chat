@@ -4,12 +4,14 @@ import { useEffect } from 'react';
 
 export function VersionPoller() {
   useEffect(() => {
+    const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
     // Poll every 5 minutes to check for new version deployment
     const interval = setInterval(async () => {
       try {
          // We attempt to fetch the build ID from Next.js generated static files
          // or a specific version endpoint. Here we fallback to checking the root page headers.
-         const res = await fetch('/', { method: 'HEAD', cache: 'no-store' });
+         const res = await fetch(`${basePath}/`, { method: 'HEAD', cache: 'no-store' });
+         if (!res.ok) return;
          const etag = res.headers.get('etag');
          if (etag) {
            const currentEtag = localStorage.getItem('app_etag');
@@ -29,8 +31,9 @@ export function VersionPoller() {
 
   useEffect(() => {
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js').then(
+      const register = () => {
+        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+        navigator.serviceWorker.register(`${basePath}/sw.js`, { scope: `${basePath}/` }).then(
           (registration) => {
             console.log('ServiceWorker registration successful with scope: ', registration.scope);
           },
@@ -38,7 +41,10 @@ export function VersionPoller() {
             console.log('ServiceWorker registration failed: ', err);
           }
         );
-      });
+      };
+      if (document.readyState === 'complete') register();
+      else window.addEventListener('load', register, { once: true });
+      return () => window.removeEventListener('load', register);
     }
   }, []);
 
