@@ -50,6 +50,7 @@ export function ChatWindow() {
   const lastTypingSentAt = useRef(0);
   const myUserId = useRef<string | null>(null);
   const openingMessageSent = useRef(false);
+  const pendingSaves = useRef<Set<Promise<void>>>(new Set());
   const takeoverRole = useRef<'target' | 'remaining' | null>(null);
 
   useEffect(() => {
@@ -98,21 +99,29 @@ export function ChatWindow() {
   }, []);
 
   useEffect(() => {
-    const handleOnline = async () => {
-      if (status !== 'chatting' || !matchId) return;
-      const failed = await getAllFromIDB();
-      for (const msg of failed) {
-        if (msg.match_id === matchId) {
+    if (status !== 'chatting' || !matchId) return;
+    let retrying = false;
+    const retryQueued = async () => {
+      if (retrying || !navigator.onLine) return;
+      retrying = true;
+      try {
+        const failed = await getAllFromIDB();
+        for (const msg of failed) {
+          if (msg.match_id !== matchId) continue;
           const { error } = await supabase.from('messages').insert(msg);
           if (!error || error.code === '23505') {
             await deleteFromIDB(msg.id);
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'saved', error: undefined } : m));
           }
         }
+      } finally {
+        retrying = false;
       }
     };
-    window.addEventListener('online', handleOnline);
-    return () => window.removeEventListener('online', handleOnline);
+    window.addEventListener('online', retryQueued);
+    void retryQueued();
+    const timer = setInterval(() => { void retryQueued(); }, 4000);
+    return () => { clearInterval(timer); window.removeEventListener('online', retryQueued); };
   }, [status, matchId]);
 
   useEffect(() => {
@@ -198,15 +207,17 @@ export function ChatWindow() {
     
     rtcManager.current?.sendMessage({ type: 'leave' });
     
-    setTimeout(async () => {
-      rtcManager.current?.close();
-      if (matchId) {
-        await supabase.rpc('leave_match', { p_match_id: matchId }).then(({ error }) => {
-          if (error) console.error('Failed to close match', error);
-        });
-      }
-      reset();
-    }, 500);
+    // Do not close the database room before in-flight message writes finish.
+    await Promise.race([
+      Promise.allSettled([...pendingSaves.current]),
+      new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+    ]);
+    rtcManager.current?.close();
+    if (matchId) {
+      const { error } = await supabase.rpc('leave_match', { p_match_id: matchId });
+      if (error) console.error('Failed to close match', error);
+    }
+    reset();
   }, [matchId, reset, ask]);
 
   useEffect(() => {
@@ -298,52 +309,20 @@ export function ChatWindow() {
           setMessages(previous => [...new Map([...history, ...previous].map(message => [message.id, message])).values()]);
       }).catch((error: unknown) => setNotice(error instanceof Error ? error.message : '無法確認使用者身分'));
 
-      const channel = supabase.channel(`match_db_${matchId}`)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `match_id=eq.${matchId}` }, (payload) => {
-           if (takeoverRole.current === 'target') return;
-           if (payload.new.type === 'system' && payload.new.content?.includes('備用安全通道')) return;
-           if (payload.new.sender_id !== myUserId.current) {
-             setMessages(prev => {
-                if (prev.find(m => m.id === payload.new.id)) return prev;
-                return [...prev, {
-                  id: payload.new.id,
-                  sender: payload.new.type === 'system' ? 'system' : 'peer',
-                  ...(payload.new.type === 'image' ? { imageUrl: payload.new.content } : { text: payload.new.content }),
-                  timestamp: new Date(payload.new.created_at).getTime(),
-                }];
-             });
-           } else {
-             setMessages(prev => prev.map(m => m.id === payload.new.id ? { ...m, status: 'saved' } : m));
-           }
-        })
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'matches', filter: `id=eq.${matchId}` }, (payload) => {
-           if (payload.new.is_taken_over) {
-             rtcManager.current?.close();
-             setPeerTyping(false);
-             setConnectionState('fallback');
-             if (payload.new.takeover_target === myUserId.current) {
-               takeoverRole.current = 'target';
-               setNotice('對方已離開');
-               setPeerLeft(true);
-             } else {
-               takeoverRole.current = 'remaining';
-               // The remaining participant silently moves to the database
-               // channel. The conversation continues with the administrator.
-               setNotice('');
-             }
-           } else if (payload.new.is_active === false) {
-             setNotice('對方已離開聊天室。');
-             setPeerLeft(true);
-           }
-        })
-        .subscribe();
-
-      const takeoverChannel = supabase.channel(`takeover_notice_${matchId}`)
-        .on('broadcast', { event: 'admin_takeover' }, ({ payload }) => {
+      // Match administration is low-frequency control-plane traffic. Active
+      // P2P messages never go through these checks or the matching queue.
+      const statusPoll = setInterval(async () => {
+        const { data, error } = await supabase
+          .from('matches')
+          .select('is_active,is_taken_over,takeover_target')
+          .eq('id', matchId)
+          .single();
+        if (error || !data) return;
+        if (data.is_taken_over && !takeoverRole.current) {
           rtcManager.current?.close();
           setPeerTyping(false);
           setConnectionState('fallback');
-          if (payload.targetUserId === myUserId.current) {
+          if (data.takeover_target === myUserId.current) {
             takeoverRole.current = 'target';
             setPeerLeft(true);
             setNotice('對方已離開');
@@ -351,31 +330,63 @@ export function ChatWindow() {
             takeoverRole.current = 'remaining';
             setNotice('');
           }
-        }).subscribe();
-
-      const takeoverPoll = setInterval(async () => {
-        const { data } = await supabase.from('matches').select('is_taken_over,takeover_target').eq('id', matchId).single();
-        if (!data?.is_taken_over || takeoverRole.current) return;
-        rtcManager.current?.close();
-        setConnectionState('fallback');
-        if (data.takeover_target === myUserId.current) {
-          takeoverRole.current = 'target';
+        } else if (data.is_active === false) {
+          rtcManager.current?.close();
           setPeerLeft(true);
-          setNotice('對方已離開');
-        } else {
-          takeoverRole.current = 'remaining';
-          setNotice('');
+          setNotice('對方已離開聊天室。');
         }
-      }, 1000);
-
+      }, 5000);
       return () => {
-        clearInterval(takeoverPoll);
+        clearInterval(statusPoll);
         rtcManager.current?.close();
-        supabase.removeChannel(channel);
-        supabase.removeChannel(takeoverChannel);
       };
     }
   }, [status, matchId, reset]);
+
+  // HTTP fallback is active only before the P2P channel opens or when it fails.
+  // Successful P2P pairs never keep a message-polling connection open.
+  useEffect(() => {
+    if (status !== 'chatting' || !matchId || connectionState === 'p2p' || peerLeft) return;
+    let active = true;
+    let reading = false;
+    let since = new Date(Date.now() - 10 * 60_000).toISOString();
+
+    const checkNewMessages = async () => {
+      if (!active || reading) return;
+      reading = true;
+      try {
+        const { data, error } = await supabase
+          .from('messages')
+          .select('id,sender_id,content,type,created_at')
+          .eq('match_id', matchId)
+          .gt('created_at', since)
+          .order('created_at', { ascending: true })
+          .limit(100);
+        if (error || !active || !data) return;
+        for (const row of data) {
+          if (row.created_at > since) since = row.created_at;
+          if (row.type === 'system' && row.content?.includes('備用安全通道')) continue;
+          if (takeoverRole.current === 'target') continue;
+          setMessages((previous) => {
+            if (previous.some((item) => item.id === row.id)) return previous;
+            return [...previous, {
+              id: row.id,
+              sender: row.sender_id === myUserId.current ? 'me' : row.type === 'system' ? 'system' : 'peer',
+              ...(row.type === 'image' ? { imageUrl: row.content } : { text: row.content }),
+              timestamp: new Date(row.created_at).getTime(),
+              status: 'saved',
+            }];
+          });
+        }
+      } finally {
+        reading = false;
+      }
+    };
+    void checkNewMessages();
+    const timer = setInterval(() => { void checkNewMessages(); }, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [status, matchId, connectionState, peerLeft]);
+
 
   const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInput(e.target.value);
@@ -398,9 +409,19 @@ export function ChatWindow() {
       content: msg.text || msg.imageUrl,
       type: msg.imageUrl ? 'image' : 'text'
     };
-    const { error } = await supabase.from('messages').insert(payload);
-    
-    if (error) {
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 7000);
+    let error: { code?: string; message: string } | null = null;
+    try {
+      const response = await supabase.from('messages').insert(payload).abortSignal(abort.signal);
+      error = response.error;
+    } catch (cause) {
+      error = { message: cause instanceof Error ? cause.message : '網路連線中斷' };
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (error && error.code !== '23505') {
       if (error.code === '42501' || error.message.includes('policy')) {
         setMessages(prev => prev.map(item => item.id === msg.id ? { ...item, status: 'failed', error: '沒有儲存權限，訊息未寫入資料庫' } : item));
         return;
@@ -412,6 +433,12 @@ export function ChatWindow() {
     } else {
       setMessages((prev) => prev.map((item) => item.id === msg.id ? { ...item, status: 'saved', error: undefined } : item));
     }
+  };
+
+  const queueSave = (msg: Message) => {
+    const task = saveToDB(msg);
+    pendingSaves.current.add(task);
+    void task.finally(() => pendingSaves.current.delete(task));
   };
 
   const submitReport = async () => {
@@ -440,14 +467,6 @@ export function ChatWindow() {
   async function handleSendText(text: string) {
     if (!text) return;
 
-    if (matchId) {
-      const { data } = await supabase.from('matches').select('is_taken_over,takeover_target').eq('id', matchId).single();
-      if (data?.is_taken_over) {
-        takeoverRole.current = data.takeover_target === myUserId.current ? 'target' : 'remaining';
-        rtcManager.current?.close();
-        setConnectionState('fallback');
-      }
-    }
     if (takeoverRole.current === 'target') {
       setPeerLeft(true);
       setNotice('對方已離開');
@@ -474,7 +493,7 @@ export function ChatWindow() {
     setMessages((prev) => [...prev, newMsg]);
     rtcManager.current?.sendMessage({ type: 'chat', message: newMsg });
     rtcManager.current?.sendMessage({ type: 'typing', isTyping: false });
-    void saveToDB(newMsg);
+    queueSave(newMsg);
   };
 
   const handleSend = () => {
@@ -539,7 +558,7 @@ export function ChatWindow() {
         };
         setMessages((prev) => [...prev, newMsg]);
         rtcManager.current?.sendMessage({ type: 'chat', message: newMsg });
-        void saveToDB(newMsg);
+        queueSave(newMsg);
       }
     } catch (error) {
       console.error('Image upload failed', error);
@@ -622,7 +641,7 @@ export function ChatWindow() {
                 {m.status === 'sent' && <><CheckCircle2 size={12} style={{ display: 'inline', verticalAlign: 'middle' }}/> 已發送</>}
                 {(m.status === 'delivered' || m.status === 'saved') && <><CheckCheck size={12} style={{ display: 'inline', verticalAlign: 'middle', color: 'var(--color-primary)' }}/> 已送達</>}
                 {m.status === 'failed' && (
-                  <button onClick={() => void saveToDB(m)} title={m.error} style={{ border: 0, background: 'transparent', color: '#dc2626', cursor: 'pointer', fontSize: 10 }}>
+                  <button onClick={() => queueSave(m)} title={m.error} style={{ border: 0, background: 'transparent', color: '#dc2626', cursor: 'pointer', fontSize: 10 }}>
                     儲存失敗，點此重試
                   </button>
                 )}
