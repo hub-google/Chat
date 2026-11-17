@@ -98,8 +98,8 @@ CREATE TABLE IF NOT EXISTS public.messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     match_id UUID NOT NULL REFERENCES public.matches(id) ON DELETE CASCADE,
     sender_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-    content TEXT NOT NULL,
-    type VARCHAR(20) DEFAULT 'text' CHECK (type IN ('text', 'image', 'system', 'icebreaker', 'topic_card')),
+    content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 4000),
+    type VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text', 'image', 'system')),
     is_archived BOOLEAN DEFAULT FALSE,
     archived_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -374,6 +374,7 @@ ON public.messages FOR INSERT TO authenticated
 WITH CHECK (
   NOT (SELECT public.is_banned())
   AND sender_id = (SELECT auth.uid())
+  AND (type IN ('text', 'image') OR ((SELECT public.is_admin()) AND type = 'system'))
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = messages.match_id
@@ -758,3 +759,19 @@ WITH CHECK (
 REVOKE ALL ON public.profiles, public.matches, public.messages,
  public.matching_pool, public.chat_reports, public.admin_takeovers,
  public.topic_cards, public.topic_categories FROM anon;
+
+-- Browser users receive only the operations the current frontend needs.
+-- In particular, RLS does NOT protect against TRUNCATE.
+REVOKE ALL ON TABLE
+  public.matches, public.messages, public.profiles, public.matching_pool,
+  public.chat_reports, public.admin_takeovers, public.topic_categories,
+  public.topic_cards, public.tunnel_webrtc_signals
+FROM authenticated;
+GRANT SELECT ON public.matches, public.admin_takeovers TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
+GRANT SELECT, DELETE ON public.matching_pool TO authenticated;
+GRANT SELECT ON public.messages TO authenticated;
+GRANT INSERT (id, match_id, sender_id, content, type) ON public.messages TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.chat_reports TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.topic_categories, public.topic_cards TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.tunnel_webrtc_signals TO authenticated;
