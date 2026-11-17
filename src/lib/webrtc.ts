@@ -1,150 +1,164 @@
 import { useMatchStore } from '../store/matchStore';
 import { supabase } from './supabase';
-import { RealtimeChannel } from '@supabase/supabase-js';
 import { getUserId } from './user';
 
 type ConnectionState = 'open' | 'closed';
+type SignalKind = 'offer' | 'answer';
 
+/**
+ * Tunnel signaling is deliberately HTTP-only. Each pair writes at most one
+ * offer and one answer to its own match. Established DataChannels use P2P.
+ */
 export class WebRTCManager {
   private pc: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
-  private channel: RealtimeChannel | null = null;
-  private onMessage: (msg: any) => void;
   private matchId: string | null = null;
   private handshakeTimeout: ReturnType<typeof setTimeout> | null = null;
-  private isInitiator: boolean = false;
   private closing = false;
-  private pendingIce: RTCIceCandidateInit[] = [];
+  private onMessage: (message: any) => void;
   private onConnectionState: (state: ConnectionState) => void;
-  
-  constructor(onMessage: (msg: any) => void, onConnectionState: (state: ConnectionState) => void = () => {}) {
+
+  constructor(onMessage: (message: any) => void, onConnectionState: (state: ConnectionState) => void = () => {}) {
     this.onMessage = onMessage;
     this.onConnectionState = onConnectionState;
   }
 
   public async initConnection(matchId: string, isInitiator: boolean) {
     this.matchId = matchId;
-    this.isInitiator = isInitiator;
-    
-    this.pc = new RTCPeerConnection({
+    this.closing = false;
+    const userId = await getUserId();
+    if (this.closing) return;
+
+    const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
+    this.pc = pc;
 
-    if (this.isInitiator) {
-      this.dataChannel = this.pc.createDataChannel('chat');
+    pc.onconnectionstatechange = () => {
+      if (this.closing) return;
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        this.onConnectionState('closed');
+      }
+    };
+
+    if (isInitiator) {
+      this.dataChannel = pc.createDataChannel('chat', { ordered: true });
       this.setupDataChannel();
     } else {
-      this.pc.ondatachannel = (event) => {
+      pc.ondatachannel = (event) => {
         this.dataChannel = event.channel;
         this.setupDataChannel();
       };
     }
 
-    this.channel = supabase.channel(`match_${matchId}`);
-    
-    this.channel.on('broadcast', { event: 'webrtc_signal' }, async (payload) => {
-      if (!this.pc) return;
-      const { sdp, ice, sender } = payload.payload;
-      const userId = await getUserId();
-      if (sender === userId) return; // ignore own signals
-
-      try {
-        if (payload.payload.type === 'ready' && this.isInitiator) {
-          await this.sendOffer();
-          return;
-        }
-        if (sdp) {
-          await this.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          for (const candidate of this.pendingIce.splice(0)) {
-            await this.pc.addIceCandidate(candidate);
-          }
-        if (sdp.type === 'offer') {
-          const answer = await this.pc.createAnswer();
-          await this.pc.setLocalDescription(answer);
-          this.channel?.send({
-            type: 'broadcast',
-            event: 'webrtc_signal',
-            payload: { sdp: this.pc.localDescription, sender: userId }
-          });
-        }
-        } else if (ice) {
-          if (this.pc.remoteDescription) await this.pc.addIceCandidate(ice);
-          else this.pendingIce.push(ice);
-        }
-      } catch (error) {
-        console.error('WebRTC signaling failed', error);
-      }
-    });
-
-    this.channel.subscribe(async (status) => {
-      if (status === 'SUBSCRIBED' && this.pc) {
-        this.channel?.send({
-          type: 'broadcast',
-          event: 'webrtc_signal',
-          payload: { type: 'ready', sender: await getUserId() }
-        });
-      }
-    });
-
-    this.pc.onicecandidate = async (event) => {
-      if (event.candidate && this.channel) {
-        this.channel.send({
-          type: 'broadcast',
-          event: 'webrtc_signal',
-          payload: { ice: event.candidate.toJSON(), sender: await getUserId() }
-        });
-      }
-    };
-
-    // 8-second handshake timeout
     this.handshakeTimeout = setTimeout(() => {
-      if (this.dataChannel?.readyState !== 'open') {
+      if (!this.closing && this.dataChannel?.readyState !== 'open') {
         this.close();
         this.onConnectionState('closed');
-        console.warn('WebRTC handshake timed out; database fallback remains active.');
       }
-    }, 8000);
+    }, 22000);
+
+    try {
+      if (isInitiator) {
+        await pc.setLocalDescription(await pc.createOffer());
+        await this.waitForIceGathering(pc);
+        if (this.closing) return;
+        await this.saveSignal(userId, 'offer', pc.localDescription!.toJSON());
+        const answer = await this.waitForSignal(userId, 'answer');
+        if (!answer || this.closing) return;
+        await pc.setRemoteDescription(answer);
+      } else {
+        const offer = await this.waitForSignal(userId, 'offer');
+        if (!offer || this.closing) return;
+        await pc.setRemoteDescription(offer);
+        await pc.setLocalDescription(await pc.createAnswer());
+        await this.waitForIceGathering(pc);
+        if (this.closing) return;
+        await this.saveSignal(userId, 'answer', pc.localDescription!.toJSON());
+      }
+    } catch (error) {
+      if (!this.closing) {
+        console.warn('HTTP WebRTC signaling failed', error);
+        this.close();
+        this.onConnectionState('closed');
+      }
+    }
   }
 
-  private async sendOffer() {
-    if (!this.pc || this.pc.signalingState !== 'stable') return;
-    const offer = await this.pc.createOffer();
-    await this.pc.setLocalDescription(offer);
-    await this.channel?.send({
-      type: 'broadcast',
-      event: 'webrtc_signal',
-      payload: { sdp: this.pc.localDescription, sender: await getUserId() },
+  private async waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timeout);
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      };
+      const check = () => { if (pc.iceGatheringState === 'complete') finish(); };
+      const timeout = setTimeout(finish, 6500);
+      pc.addEventListener('icegatheringstatechange', check);
+      check();
     });
+  }
+
+  private async saveSignal(senderId: string, kind: SignalKind, sdp: RTCSessionDescriptionInit) {
+    const { error } = await supabase.from('tunnel_webrtc_signals').upsert(
+      { match_id: this.matchId, sender_id: senderId, kind, sdp },
+      { onConflict: 'match_id,sender_id' },
+    );
+    if (error) throw new Error('無法交換 P2P 連線資料：' + error.message);
+  }
+
+  private async waitForSignal(userId: string, kind: SignalKind): Promise<RTCSessionDescriptionInit | null> {
+    const deadline = Date.now() + 20000;
+    while (!this.closing && Date.now() < deadline) {
+      const { data, error } = await supabase
+        .from('tunnel_webrtc_signals')
+        .select('sdp')
+        .eq('match_id', this.matchId!)
+        .neq('sender_id', userId)
+        .eq('kind', kind)
+        .limit(1)
+        .maybeSingle();
+      if (error) throw new Error('讀取 P2P 連線資料失敗：' + error.message);
+      if (data?.sdp) return data.sdp as RTCSessionDescriptionInit;
+      await new Promise<void>((resolve) => setTimeout(resolve, 800));
+    }
+    if (!this.closing) {
+      this.close();
+      this.onConnectionState('closed');
+    }
+    return null;
   }
 
   private setupDataChannel() {
     if (!this.dataChannel) return;
-
     this.dataChannel.onopen = () => {
+      if (this.closing) return;
       if (this.handshakeTimeout) clearTimeout(this.handshakeTimeout);
-      useMatchStore.getState().setMatch(this.matchId as string);
+      if (this.matchId) useMatchStore.getState().setMatch(this.matchId);
       this.onConnectionState('open');
     };
-
     this.dataChannel.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data);
         if (parsed && typeof parsed === 'object') this.onMessage(parsed);
       } catch {
-        console.warn('Dropped malformed WebRTC message');
+        console.warn('Dropped malformed P2P message');
       }
     };
-
     this.dataChannel.onclose = () => {
-      if (!this.closing) {
-        this.onConnectionState('closed');
-      }
+      if (!this.closing) this.onConnectionState('closed');
     };
   }
 
-  public sendMessage(message: any) {
-    if (this.dataChannel && this.dataChannel.readyState === 'open') {
+  public sendMessage(message: any): boolean {
+    if (this.dataChannel?.readyState !== 'open') return false;
+    try {
       this.dataChannel.send(JSON.stringify(message));
+      return true;
+    } catch {
+      this.onConnectionState('closed');
+      return false;
     }
   }
 
@@ -152,13 +166,9 @@ export class WebRTCManager {
     if (this.closing) return;
     this.closing = true;
     if (this.handshakeTimeout) clearTimeout(this.handshakeTimeout);
-    if (this.dataChannel) this.dataChannel.close();
-    if (this.pc) this.pc.close();
-    if (this.channel) supabase.removeChannel(this.channel);
-
+    this.dataChannel?.close();
+    this.pc?.close();
     this.dataChannel = null;
     this.pc = null;
-    this.channel = null;
-    this.pendingIce = [];
   }
 }
