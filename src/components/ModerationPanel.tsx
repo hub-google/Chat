@@ -51,8 +51,24 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     setLoading(false);
   }, [hours]);
 
-  useEffect(() => { void refresh(); }, [refresh, refreshToken]);
-  useEffect(() => { setSelected(null); setSources([]); }, [hours]);
+  // The server request is the effect; state is updated only when it resolves.
+  // Range changes clear stale drill-down data directly in their click handler.
+  useEffect(() => {
+    let active = true;
+    void Promise.all([
+      supabase.rpc('tunnel_admin_phrase_ranking', { p_hours: hours }),
+      supabase.rpc('tunnel_admin_list_ip_bans'),
+    ]).then(([ranked, currentBans]) => {
+      if (!active) return;
+      if (ranked.error || currentBans.error) setError(ranked.error?.message ?? currentBans.error?.message ?? '查詢失敗');
+      else {
+        setPhrases((ranked.data ?? []) as Phrase[]);
+        setBans((currentBans.data ?? []) as BanRow[]);
+      }
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [hours, refreshToken]);
 
   async function showSources(phrase: string) {
     if (selected === phrase) { setSelected(null); setSources([]); return; }
@@ -106,7 +122,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
         <button className={styles.subtle} disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={16}/>更新</button>
       </div>
       <div className={styles.controls}>
-        <div className={styles.segment}>{([1,6,24] as const).map(h => <button type="button" key={h} onClick={() => setHours(h)} className={hours===h ? styles.active : ''}>{h} 小時</button>)}</div>
+        <div className={styles.segment}>{([1,6,24] as const).map(h => <button type="button" key={h} onClick={() => { setHours(h); setSelected(null); setSources([]); setLoading(true); }} className={hours===h ? styles.active : ''}>{h} 小時</button>)}</div>
         <label>封鎖期限 <select value={duration} onChange={e => setDuration(e.target.value as BanDuration)}>{durations.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}</select></label>
       </div>
       {error && <div className={styles.error} role="alert">{error}</div>}
