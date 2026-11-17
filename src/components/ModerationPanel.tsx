@@ -146,7 +146,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     <section className={styles.panel}>
       <div className={styles.head}><div><h2>IP 黑名單</h2><p>封鎖到期自動失效，不需要 Worker 或排程；最多顯示最近 300 筆紀錄。</p></div></div>
       <div className={styles.tableWrap}><table><thead><tr><th>IP</th><th>原因</th><th>封鎖至</th><th>狀態</th><th>操作</th></tr></thead><tbody>
-        {bans.map(b => <tr key={b.ip}><td className={styles.mono}>{b.ip}</td><td>{b.reason}</td><td>{time(b.expires_at)}</td><td>{b.is_active ? '封鎖中' : '已到期'}</td><td><button type="button" className={styles.subtle} disabled={busy} onClick={() => void unbanIp(b.ip)}><Trash2 size={14}/>解除</button></td></tr>)}
+        {bans.map(b => <tr key={b.ip}><td className={styles.mono}>{b.ip}</td><td>{b.reason}</td><td>{time(b.expires_at)}</td><td>{b.is_active ? '封鎖中' : '已到期'}</td><td><div className={styles.actions}><button type="button" className={styles.subtle} disabled={busy} onClick={() => void banIp(b.ip)}>更新期限</button><button type="button" className={styles.subtle} disabled={busy} onClick={() => void unbanIp(b.ip)}><Trash2 size={14}/>解除</button></div></td></tr>)}
         {!loading && bans.length===0 && <tr><td colSpan={5} className={styles.empty}>目前沒有 IP 封鎖紀錄</td></tr>}
       </tbody></table></div>
     </section>
