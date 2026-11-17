@@ -238,6 +238,13 @@ export function ChatWindow() {
            if (msg.type === 'leave') {
              setNotice('對方已離開聊天室。');
              setPeerLeft(true);
+             // Either participant may finalize the room. This covers the case
+             // where the departing browser sends a P2P leave but its own
+             // database request fails or the page closes immediately after.
+             void supabase.rpc('leave_match', { p_match_id: matchId })
+               .then(({ error }) => {
+                 if (error) console.error('Could not finalize peer leave', error);
+               });
            } else if (msg.type === 'typing') {
              setPeerTyping(msg.isTyping);
              if (typingTimeout.current) clearTimeout(typingTimeout.current);
