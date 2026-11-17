@@ -163,7 +163,7 @@ export function UserHUD() {
   }, [status, setMatch, setStatus]);
 
   const handleStartMatching = async () => {
-    const lastMatchTime = localStorage.getItem('last_match_time');
+    const lastMatchTime = localStorage.getItem('tunnel:last_match_time');
     if (lastMatchTime && Date.now() - parseInt(lastMatchTime, 10) < 5000) {
       setErrorMsg('配對頻率過高（安全防護限制），請等候 5 秒再試。');
       return;
@@ -233,7 +233,7 @@ export function UserHUD() {
       setLoadingMsg('尋找配對中...');
       // Only throttle requests that actually reached the matching operation.
       // Authentication/geolocation setup failures should remain immediately retryable.
-      localStorage.setItem('last_match_time', Date.now().toString());
+      localStorage.setItem('tunnel:last_match_time', Date.now().toString());
       matchingParams.current = { userId, intent, lat, lng, distanceMode, distanceKm };
       setLoadingMsg(!hasLocation ? '未取得定位，正在不限距離配對…' : preciseLocationGranted ? '尋找配對中...' : '使用大略位置尋找配對中...');
       

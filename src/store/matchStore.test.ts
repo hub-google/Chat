@@ -35,7 +35,7 @@ describe('MatchStore', () => {
 
 describe('match-store hydration', () => {
   it('never restores a queue that has no matching heartbeat after reload', async () => {
-    localStorage.setItem('match-storage', JSON.stringify({
+    localStorage.setItem('tunnel-match-storage', JSON.stringify({
       state: { status: 'waiting', matchId: null, intent: 'venting', distanceMode: 'unlimited' },
       version: 0,
     }));
@@ -48,7 +48,7 @@ describe('match-store hydration', () => {
   });
 
   it('restores a chatting room so it can be checked against the database', async () => {
-    localStorage.setItem('match-storage', JSON.stringify({
+    localStorage.setItem('tunnel-match-storage', JSON.stringify({
       state: { status: 'chatting', matchId: 'test-room-id', intent: 'chill' },
       version: 0,
     }));

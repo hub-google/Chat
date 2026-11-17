@@ -33,7 +33,7 @@ describe('VersionPoller', () => {
     const ui = render(<VersionPoller />);
     await vi.advanceTimersByTimeAsync(300000);
     expect(request).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem('app_etag')).toBe('etag-initial');
+    expect(localStorage.getItem('tunnel:etag:/')).toBe('etag-initial');
     ui.unmount();
   });
 });

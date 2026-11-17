@@ -64,7 +64,7 @@ export const useMatchStore = create<MatchState>()(
   };
     },
     {
-      name: 'match-storage',
+      name: 'tunnel-match-storage',
       // A waiting room cannot survive reload: the in-memory matching parameters
       // and heartbeat are gone, so a persisted 'waiting' state would hang forever.
       // A live chatting matchId is still restored and validated by ChatWindow.
