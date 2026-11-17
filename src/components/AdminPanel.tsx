@@ -230,6 +230,28 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
     }
   }
 
+  async function endTakeover() {
+    if (!takeover) return;
+    if (!await ask('結束接管並關閉此聊天室？')) return;
+    setErrorMsg('');
+    // Closing the browser-side drawer never ended the database takeover.
+    // Explicitly terminate the match, so all remaining participants see the
+    // same ended state and the administrator cannot silently rejoin.
+    const { error } = await supabase.rpc('terminate_match_by_admin', {
+      p_match_id: takeover.matchId,
+      p_reason: '管理員結束接管',
+    });
+    if (error) {
+      setErrorMsg(`結束接管失敗：${error.message}`);
+      return;
+    }
+    setTakeover(null);
+    setTakeoverMsg('');
+    setMonitorMatchId(null);
+    setMonitorMessages([]);
+    await fetchSessions();
+  }
+
   async function sendTakeoverMessage() {
     if (!takeover || !takeoverMsg.trim()) return;
     // Audit messages using the actual administrator ID. Never forge the
@@ -293,7 +315,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
       </main>
 
       {selectedSession && <ProfileDrawer session={selectedSession} profiles={profiles} onClose={() => setSelectedMatchId(null)} onTakeover={handleTakeover} />}
-      {monitorMatchId && <MonitorDrawer matchId={monitorMatchId} messages={monitorMessages} takeover={takeover?.matchId === monitorMatchId ? takeover : null} value={takeoverMsg} onValueChange={setTakeoverMsg} onSend={sendTakeoverMessage} onEndTakeover={() => setTakeover(null)} onClose={() => { setMonitorMatchId(null); setMonitorMessages([]); }} />}
+      {monitorMatchId && <MonitorDrawer matchId={monitorMatchId} messages={monitorMessages} takeover={takeover?.matchId === monitorMatchId ? takeover : null} value={takeoverMsg} onValueChange={setTakeoverMsg} onSend={sendTakeoverMessage} onEndTakeover={() => { void endTakeover(); }} onClose={() => { setMonitorMatchId(null); setMonitorMessages([]); }} />}
     </div>
   );
 }
@@ -336,5 +358,5 @@ function AnalyticsView({ stats, loading }: { stats: { totalMatches: number; acti
 function MonitorDrawer({ matchId, messages, takeover, value, onValueChange, onSend, onEndTakeover, onClose }: { matchId: string; messages: MessageRow[]; takeover: { matchId: string; targetUserId: string } | null; value: string; onValueChange: (value: string) => void; onSend: () => Promise<void>; onEndTakeover: () => void; onClose: () => void }) {
   const visibleMessages = messages.filter((message) => message.type !== 'system');
   const otherUserId = visibleMessages.find((message) => message.sender_id !== takeover?.targetUserId)?.sender_id;
-  return <div className={styles.drawerBackdrop} onMouseDown={onClose}><aside className={`${styles.drawer} ${styles.monitorDrawer} ${takeover ? 'admin-takeover-drawer' : ''}`} onMouseDown={(event) => event.stopPropagation()}><header className="support-header"><div className="support-avatar"><UserRound size={21} /></div><div className="support-contact"><span>{takeover ? '接管對話進行中' : '即時對話監看'}</span><h2>{otherUserId ? `匿名使用者 ${shortId(otherUserId)}` : `場次 ${shortId(matchId)}`}</h2><small><i /> 即時連線 · 場次 {shortId(matchId)}</small></div>{takeover && <div className="support-identity"><span>目前回覆身分</span><strong>{shortId(takeover.targetUserId)}</strong></div>}<button className="support-close" onClick={onClose} aria-label="關閉"><X size={20} /></button></header><div className={`${styles.messages} support-messages`}>{visibleMessages.length === 0 ? <div className={styles.empty}>目前尚無訊息</div> : visibleMessages.map((message) => { const impersonated = takeover?.targetUserId === message.sender_id; return <div className={`${styles.message} ${impersonated ? 'admin-impersonated-message' : ''}`} key={message.id}><strong>{impersonated ? '我方（接管身分）' : `對方 ${shortId(message.sender_id)}`}</strong>{message.type === 'image' ? <img className="admin-message-image" src={message.content} alt="對話圖片" /> : <p>{message.content}</p>}<time>{message.created_at ? new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at)) : ''}</time></div>; })}</div>{takeover && <div className="admin-takeover-composer"><div className="support-compose-label"><span>以 {shortId(takeover.targetUserId)} 身分回覆</span><small>Enter 送出 · Shift + Enter 換行</small></div><textarea value={value} onChange={(event) => onValueChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder="輸入回覆內容…" autoFocus /><button className="admin-send-takeover" onClick={() => void onSend()} aria-label="送出訊息"><Send size={18} /><span>送出</span></button><button className="admin-end-takeover" onClick={onEndTakeover}>結束接管</button></div>}</aside></div>;
+  return <div className={styles.drawerBackdrop} onMouseDown={onClose}><aside className={`${styles.drawer} ${styles.monitorDrawer} ${takeover ? 'admin-takeover-drawer' : ''}`} onMouseDown={(event) => event.stopPropagation()}><header className="support-header"><div className="support-avatar"><UserRound size={21} /></div><div className="support-contact"><span>{takeover ? '接管對話進行中' : '即時對話監看'}</span><h2>{otherUserId ? `匿名使用者 ${shortId(otherUserId)}` : `場次 ${shortId(matchId)}`}</h2><small><i /> 即時連線 · 場次 {shortId(matchId)}</small></div>{takeover && <div className="support-identity"><span>目前回覆身分</span><strong>{shortId(takeover.targetUserId)}</strong></div>}<button className="support-close" onClick={onClose} aria-label="關閉"><X size={20} /></button></header><div className={`${styles.messages} support-messages`}>{visibleMessages.length === 0 ? <div className={styles.empty}>目前尚無訊息</div> : visibleMessages.map((message) => { const impersonated = takeover?.targetUserId === message.sender_id; return <div className={`${styles.message} ${impersonated ? 'admin-impersonated-message' : ''}`} key={message.id}><strong>{impersonated ? '我方（接管身分）' : `對方 ${shortId(message.sender_id)}`}</strong>{message.type === 'image' ? <img className="admin-message-image" src={message.content} alt="對話圖片" /> : <p>{message.content}</p>}<time>{message.created_at ? new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at)) : ''}</time></div>; })}</div>{takeover && <div className="admin-takeover-composer"><div className="support-compose-label"><span>以 {shortId(takeover.targetUserId)} 身分回覆</span><small>Enter 送出 · Shift + Enter 換行</small></div><textarea value={value} onChange={(event) => onValueChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder="輸入回覆內容…" autoFocus /><button className="admin-send-takeover" onClick={() => void onSend()} aria-label="送出訊息"><Send size={18} /><span>送出</span></button><button className="admin-end-takeover" onClick={onEndTakeover}>結束接管並關閉聊天室</button></div>}</aside></div>;
 }
