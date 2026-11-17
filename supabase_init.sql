@@ -292,27 +292,8 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, private, extensions;
 
--- Anonymous Auth 建立帳號後立即補齊 profile，避免配對池與訊息 FK 寫入失敗。
-CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
-RETURNS TRIGGER AS $$
-BEGIN
-    INSERT INTO public.profiles (id, status)
-    VALUES (NEW.id, 'online')
-    ON CONFLICT (id) DO NOTHING;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
-
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-CREATE TRIGGER on_auth_user_created
-AFTER INSERT ON auth.users
-FOR EACH ROW EXECUTE FUNCTION public.handle_new_auth_user();
-
--- 讓既有 Auth 使用者也能安全補建 profile。
-INSERT INTO public.profiles (id, status)
-SELECT id, 'offline' FROM auth.users
-ON CONFLICT (id) DO NOTHING;
-
+-- Tunnel profiles are created only by the Tunnel frontend's ensureUser()
+-- on entry, not for every new auth.users user in this shared Supabase project.
 DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
 DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
 DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
