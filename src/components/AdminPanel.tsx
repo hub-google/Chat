@@ -232,8 +232,22 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
 
   async function sendTakeoverMessage() {
     if (!takeover || !takeoverMsg.trim()) return;
-    const { error } = await supabase.from('messages').insert({ id: crypto.randomUUID(), match_id: takeover.matchId, sender_id: takeover.targetUserId, content: takeoverMsg.trim(), type: 'text' });
-    if (error) setErrorMsg(error.message); else setTakeoverMsg('');
+    // Audit messages using the actual administrator ID. Never forge the
+    // removed participant's sender_id in the permanent conversation record.
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      setErrorMsg('管理員身分已失效，請重新登入');
+      return;
+    }
+    const { error } = await supabase.from('messages').insert({
+      id: crypto.randomUUID(),
+      match_id: takeover.matchId,
+      sender_id: user.id,
+      content: takeoverMsg.trim(),
+      type: 'text',
+    });
+    if (error) setErrorMsg(error.message);
+    else { setTakeoverMsg(''); setErrorMsg(''); }
   }
 
   async function banUser(userId: string) {

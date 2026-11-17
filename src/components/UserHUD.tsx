@@ -117,25 +117,33 @@ export function UserHUD() {
         // Re-run the atomic matcher every heartbeat. Merely updating the row
         // cannot discover users who joined after the first RPC call.
         pingInterval.current = setInterval(async () => {
-           const params = matchingParams.current;
-           if (params && !matchingAttemptRunning.current) {
-             matchingAttemptRunning.current = true;
-             const effectiveMode = params.distanceMode;
-             const effectiveKm = params.distanceMode === 'unlimited' || params.distanceMode === 'farthest' ? null : params.distanceKm;
-             const { data, error } = await supabase.rpc('fn_match_user', {
-               p_user_id: params.userId,
-               p_intent: params.intent,
-               p_lat: params.lat,
-               p_lng: params.lng,
-               p_max_distance_km: effectiveKm,
-               p_distance_mode: effectiveMode,
-             });
-             matchingAttemptRunning.current = false;
-             if (error && isSubscribed) setErrorMsg(`配對連線中斷：${error.message}`);
-             const matched = data?.[0];
-             if (matched?.match_id && isSubscribed) setMatch(matched.match_id);
-           }
-           
+          const params = matchingParams.current;
+          if (!params || matchingAttemptRunning.current || !isSubscribed) return;
+          matchingAttemptRunning.current = true;
+          try {
+            const effectiveKm = params.distanceMode === 'unlimited' || params.distanceMode === 'farthest'
+              ? null : params.distanceKm;
+            const { data, error } = await supabase.rpc('fn_match_user', {
+              p_user_id: params.userId,
+              p_intent: params.intent,
+              p_lat: params.lat,
+              p_lng: params.lng,
+              p_max_distance_km: effectiveKm,
+              p_distance_mode: params.distanceMode,
+            });
+            if (!isSubscribed || useMatchStore.getState().status !== 'waiting') return;
+            if (error) {
+              setErrorMsg(`配對連線中斷：${error.message}`);
+            } else if (data?.[0]?.match_id) {
+              setMatch(data[0].match_id);
+            }
+          } catch (error) {
+            if (isSubscribed) {
+              setErrorMsg(error instanceof Error ? error.message : '配對伺服器暫時無法連線');
+            }
+          } finally {
+            matchingAttemptRunning.current = false;
+          }
         }, 4000 + Math.floor(Math.random() * 2000));
 
         return () => {
@@ -229,7 +237,10 @@ export function UserHUD() {
       matchingParams.current = { userId, intent, lat, lng, distanceMode, distanceKm };
       setLoadingMsg(!hasLocation ? '未取得定位，正在不限距離配對…' : preciseLocationGranted ? '尋找配對中...' : '使用大略位置尋找配對中...');
       
-      const { data, error } = await supabase.rpc('fn_match_user', {
+      matchingAttemptRunning.current = true;
+      let rpcResult;
+      try {
+        rpcResult = await supabase.rpc('fn_match_user', {
         p_user_id: userId,
         p_intent: intent,
         p_lat: lat,
@@ -237,6 +248,10 @@ export function UserHUD() {
         p_max_distance_km: distanceMode === 'unlimited' || distanceMode === 'farthest' ? null : distanceKm,
         p_distance_mode: distanceMode
       });
+      } finally {
+        matchingAttemptRunning.current = false;
+      }
+      const { data, error } = rpcResult;
 
       if (error) {
         console.error('Match error', error);
@@ -253,6 +268,8 @@ export function UserHUD() {
         setMatch(matchData.match_id); // Instant match!
       }
     } catch (err: any) {
+      matchingParams.current = null;
+      matchingAttemptRunning.current = false;
       console.error(err);
       setStatus('idle');
       setErrorMsg(err.message || '發生未知錯誤，請稍後再試。');

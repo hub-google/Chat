@@ -1,4 +1,3 @@
-import { useMatchStore } from '../store/matchStore';
 import { supabase } from './supabase';
 import { getUserId } from './user';
 
@@ -135,10 +134,10 @@ export class WebRTCManager {
     this.dataChannel.onopen = () => {
       if (this.closing) return;
       if (this.handshakeTimeout) clearTimeout(this.handshakeTimeout);
-      if (this.matchId) useMatchStore.getState().setMatch(this.matchId);
       this.onConnectionState('open');
     };
     this.dataChannel.onmessage = (event) => {
+      if (typeof event.data !== 'string' || event.data.length > 25000) return;
       try {
         const parsed = JSON.parse(event.data);
         if (parsed && typeof parsed === 'object') this.onMessage(parsed);
