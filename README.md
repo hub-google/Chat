@@ -39,7 +39,7 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 
 ### 備份限制
 
-`.github/workflows/backup.yml` 需設定 `SUPABASE_SERVICE_KEY`、`GDRIVE_CREDENTIALS`、`GDRIVE_FOLDER_ID`。目前歷史執行紀錄有因憑證缺失而失敗的情況；**未確認備份成功前不得視為有遠端備份**。該流程只在 Drive 校驗完成後才清理對應的資料庫訊息。管理後台不具備直接從 Drive 讀取已清理的歷史訊息功能。
+`.github/workflows/backup.yml` 需設定 `SUPABASE_SERVICE_KEY`、`GDRIVE_CREDENTIALS`、`GDRIVE_FOLDER_ID`。目前歷史執行紀錄有因憑證缺失而失敗的情況；**未確認備份成功前不得視為有遠端備份**。流程改為**校驗 Drive 檔案後，只更新 Supabase 訊息的 `backup_verified_at` 欄位，不刪除任何原始訊息**，確保管理後台仍能讀取原對話。每輪最多備份 500 則尚未完成備份的舊訊息；未設定憑證時保留資料並明確報錯。
 
 目前程式與安全測試不能代替實際的雙裝置連線、網路斷線和大量同時在線壓力測試。
 

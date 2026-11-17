@@ -1,4 +1,4 @@
-name: Database Backup & Cleanup
+name: Database Backup (non-destructive)
 
 on:
   schedule:
@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: npm install @supabase/supabase-js googleapis
 
-      - name: Run backup script
+      - name: Verify Drive archive and mark backed-up messages
         env:
           SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

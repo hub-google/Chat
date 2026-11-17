@@ -102,8 +102,14 @@ CREATE TABLE IF NOT EXISTS public.messages (
     type VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text', 'image', 'system')),
     is_archived BOOLEAN DEFAULT FALSE,
     archived_at TIMESTAMPTZ,
+    backup_verified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS backup_verified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_tunnel_messages_pending_backup
+  ON public.messages (created_at, id)
+  WHERE backup_verified_at IS NULL;
 
 -- 1.5 風控與舉報審核表 (chat_reports)
 CREATE TABLE IF NOT EXISTS public.chat_reports (
