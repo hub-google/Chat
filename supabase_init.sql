@@ -750,7 +750,15 @@ REVOKE ALL ON TABLE
   public.topic_cards, public.tunnel_webrtc_signals
 FROM authenticated;
 GRANT SELECT ON public.matches, public.admin_takeovers TO authenticated;
-GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
+GRANT SELECT ON public.profiles TO authenticated;
+-- Protect role, admin_until, reputation_score from browser-controlled updates.
+REVOKE INSERT, UPDATE ON public.profiles FROM authenticated;
+GRANT INSERT (id) ON public.profiles TO authenticated;
+GRANT UPDATE (
+ nickname, gender, age, city, job, bio, opening_message, lat, lng,
+ location_updated_at, device_fingerprint, last_ip, last_ip_location_zh,
+ status, updated_at
+) ON public.profiles TO authenticated;
 GRANT SELECT, DELETE ON public.matching_pool TO authenticated;
 GRANT SELECT ON public.messages TO authenticated;
 GRANT INSERT (id, match_id, sender_id, content, type) ON public.messages TO authenticated;
