@@ -49,6 +49,12 @@ describe('UserHUD', () => {
     vi.clearAllMocks();
     localStorage.clear();
     useMatchStore.getState().reset();
+    // The real app checks IP bans before obtaining geolocation or matching.
+    (supabase.rpc as any).mockImplementation((name: string) =>
+      Promise.resolve(name === 'tunnel_access_allowed'
+        ? { data: true, error: null }
+        : { data: [{ match_id: 'mock-match-456' }], error: null }),
+    );
   });
 
   it('authenticates and calls rpc.fn_match_user when start button is clicked', async () => {
@@ -58,7 +64,7 @@ describe('UserHUD', () => {
       data: { user: { id: 'mock-user-123' } },
       error: null,
     });
-    (supabase.rpc as any).mockResolvedValue({ data: [{ match_id: 'mock-match-456' }], error: null });
+    // RPC implementation from beforeEach models an allowed visitor and a match.
     
     // Mock geolocation to succeed immediately
     mockGeolocation.getCurrentPosition.mockImplementation((success) => 
@@ -92,6 +98,28 @@ describe('UserHUD', () => {
         p_lng: 121.5,
       }));
     });
+  });
+
+  it('blocks banned IPs before reading location or creating a match', async () => {
+    (fingerprint.generateDeviceFingerprint as any).mockResolvedValue('mocked-fingerprint');
+    (supabase.auth.getUser as any).mockResolvedValue({
+      data: { user: { id: 'mock-user-123' } },
+      error: null,
+    });
+    (supabase.rpc as any).mockImplementation((name: string) =>
+      Promise.resolve(name === 'tunnel_access_allowed'
+        ? { data: false, error: null }
+        : { data: [{ match_id: 'mock-match-456' }], error: null }),
+    );
+
+    render(<UserHUD />);
+    fireEvent.click(screen.getByText(/開始匿名配對/i));
+
+    await waitFor(() => {
+      expect(screen.getByText(/此 IP 已被管理員暫時封鎖/i)).toBeInTheDocument();
+    });
+    expect(mockGeolocation.getCurrentPosition).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('fn_match_user', expect.anything());
   });
 
   it('handles auth error gracefully if not authenticated', async () => {
