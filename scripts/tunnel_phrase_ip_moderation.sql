@@ -188,7 +188,7 @@ BEGIN
   v_until := now()+v_period;
   INSERT INTO private.tunnel_ip_bans(ip,expires_at,reason,created_by)
   VALUES (v_ip,v_until,left(coalesce(p_reason,''),400),auth.uid())
-  ON CONFLICT(ip) DO UPDATE SET expires_at=GREATEST(private.tunnel_ip_bans.expires_at,EXCLUDED.expires_at),
+  ON CONFLICT(ip) DO UPDATE SET expires_at=EXCLUDED.expires_at,
     reason=EXCLUDED.reason,created_by=EXCLUDED.created_by,created_at=now()
   RETURNING expires_at INTO v_until;
   RETURN v_until;
