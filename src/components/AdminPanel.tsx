@@ -3,15 +3,16 @@
 import Link from 'next/link';
 import { startTransition, useEffect, useMemo, useState } from 'react';
 import {
-  Activity, AlertTriangle, BarChart3, ChevronRight, Eye, Flag,
+  Activity, AlertTriangle, Ban, BarChart3, ChevronRight, Eye, Flag,
   MessageCircle, RefreshCw, Send, ShieldCheck, StopCircle, UserRound, X,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { ensureUser } from '../lib/user';
 import styles from './AdminPanel.module.css';
+import { ModerationPanel } from './ModerationPanel';
 import { useActionDialog } from './useActionDialog';
 
-type AdminView = 'sessions' | 'reports' | 'analytics';
+type AdminView = 'sessions' | 'reports' | 'analytics' | 'moderation';
 type AnalyticsRange = 'today' | '7d' | '30d' | 'all';
 
 interface ActiveSession {
@@ -57,6 +58,7 @@ const viewMeta = {
   sessions: { eyebrow: '即時營運', title: '連線監控', description: '查看目前與近期配對、雙方公開資料及對話狀態。' },
   reports: { eyebrow: '安全中心', title: '檢舉審核', description: '處理使用者檢舉、查看對話快照，並決定封鎖或略過。' },
   analytics: { eyebrow: '營運洞察', title: '數據分析', description: '獨立檢視平台配對量、線上人數與檢舉趨勢。' },
+  moderation: { eyebrow: '安全中心', title: '熱門文字與 IP 封鎖', description: '分析重複發送的文字，查看 IP 與裝置資訊，設定期限式封鎖。' },
 } satisfies Record<AdminView, { eyebrow: string; title: string; description: string }>;
 
 const genderLabel = (gender: string | null) => gender === 'male' ? '男性' : gender === 'female' ? '女性' : '未填寫';
@@ -81,6 +83,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   const [takeoverMsg, setTakeoverMsg] = useState('');
   const [adminUserId, setAdminUserId] = useState<string | null>(null);
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('30d');
+  const [moderationRefresh, setModerationRefresh] = useState(0);
 
   const selectedSession = useMemo(() => sessions.find((item) => item.id === selectedMatchId) ?? null, [sessions, selectedMatchId]);
 
@@ -131,7 +134,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
     setLoading(false);
   }
 
-  const refresh = () => view === 'sessions' ? fetchSessions() : view === 'reports' ? fetchReports() : fetchAnalytics();
+  const refresh = () => view === 'sessions' ? fetchSessions() : view === 'reports' ? fetchReports() : view === 'analytics' ? fetchAnalytics() : Promise.resolve();
 
   useEffect(() => {
     void (async () => {
@@ -303,6 +306,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
         <nav className={styles.nav} aria-label="管理中心導覽">
           <Link className={view === 'sessions' ? styles.activeNav : ''} href="/admin"><Activity size={19} />連線監控</Link>
           <Link className={view === 'reports' ? styles.activeNav : ''} href="/admin/reports"><Flag size={19} />檢舉審核</Link>
+          <Link className={view === 'moderation' ? styles.activeNav : ''} href="/admin/moderation"><Ban size={19} />IP 封鎖管理</Link>
           <Link className={view === 'analytics' ? styles.activeNav : ''} href="/admin/analytics"><BarChart3 size={19} />數據分析</Link>
         </nav>
         <div className={styles.sidebarNote}><ShieldCheck size={16} /><span>管理操作皆受權限控管</span></div>
@@ -311,13 +315,14 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
       <main className={styles.main}>
         <header className={styles.header}>
           <div><span className={styles.eyebrow}>{meta.eyebrow}</span><h1>{meta.title}</h1><p>{meta.description}</p></div>
-          <button className={styles.refreshButton} onClick={() => void refresh()} disabled={loading}><RefreshCw size={17} className={loading ? styles.spinning : ''} />重新整理</button>
+          <button className={styles.refreshButton} onClick={() => { if (view === 'moderation') setModerationRefresh(n => n + 1); else void refresh(); }} disabled={view !== 'moderation' && loading}><RefreshCw size={17} className={loading ? styles.spinning : ''} />重新整理</button>
         </header>
 
         {errorMsg && <div className={styles.error} role="alert"><AlertTriangle size={18} />{errorMsg}</div>}
 
         {view === 'sessions' && <SessionsView sessions={sessions} profiles={profiles} loading={loading} selectedMatchId={selectedMatchId} onSelect={setSelectedMatchId} onMonitor={(id) => { setMonitorMessages([]); setMonitorMatchId(id); }} onTerminate={terminateSession} />}
         {view === 'reports' && <ReportsView reports={reports} loading={loading} onBan={banUser} onDismiss={dismissReport} />}
+        {view === 'moderation' && <ModerationPanel refreshToken={moderationRefresh} />}
         {view === 'analytics' && <><div className="analytics-range"><span>統計區間</span>{([['today','今日'],['7d','近 7 天'],['30d','近 30 天'],['all','全部']] as const).map(([value, label]) => <button className={analyticsRange === value ? 'active' : ''} key={value} onClick={() => setAnalyticsRange(value)}>{label}</button>)}</div><AnalyticsView stats={stats} loading={loading} /></>}
       </main>
 
