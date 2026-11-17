@@ -112,19 +112,8 @@ export function UserHUD() {
           return;
         }
         
-        const channel = supabase.channel('matching')
-          .on(
-            'postgres_changes',
-            { event: 'INSERT', schema: 'public', table: 'matches' },
-            (payload) => {
-              const participants = payload.new.participants as string[];
-              if (participants.includes(userId)) {
-                if (isSubscribed) setMatch(payload.new.id);
-              }
-            }
-          )
-          .subscribe();
-
+        // No Realtime subscription: the queue RPC detects both new and existing
+        // matches; successful pairs immediately leave the waiting pool.
         // Re-run the atomic matcher every heartbeat. Merely updating the row
         // cannot discover users who joined after the first RPC call.
         pingInterval.current = setInterval(async () => {
@@ -147,26 +136,10 @@ export function UserHUD() {
              if (matched?.match_id && isSubscribed) setMatch(matched.match_id);
            }
            
-           // 2. Fallback check: in case we missed the Realtime INSERT event
-           if (isSubscribed) {
-             const { data: activeMatch } = await supabase
-               .from('matches')
-               .select('id')
-               .contains('participants', [userId])
-               .eq('is_active', true)
-               .order('created_at', { ascending: false })
-               .limit(1)
-               .maybeSingle();
-               
-             if (activeMatch && activeMatch.id) {
-               setMatch(activeMatch.id);
-             }
-           }
-        }, 4000);
+        }, 4000 + Math.floor(Math.random() * 2000));
 
         return () => {
           isSubscribed = false;
-          supabase.removeChannel(channel);
           if (pingInterval.current) clearInterval(pingInterval.current);
           // Delete from pool when unmounting/leaving waiting
           void supabase.from('matching_pool').delete().eq('user_id', userId);
