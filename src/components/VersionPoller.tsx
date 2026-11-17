@@ -1,28 +1,32 @@
 'use client';
 
 import { useEffect } from 'react';
+import { useMatchStore } from '../store/matchStore';
 
 export function VersionPoller() {
   useEffect(() => {
     const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
-    // Poll every 5 minutes to check for new version deployment
+    // Never refresh a matched or queued user: deployment must not interrupt
+    // an ongoing P2P room. Apply version changes only after returning to lobby.
     const interval = setInterval(async () => {
+      if (useMatchStore.getState().status !== 'idle') return;
       try {
-         // We attempt to fetch the build ID from Next.js generated static files
-         // or a specific version endpoint. Here we fallback to checking the root page headers.
-         const res = await fetch(`${basePath}/`, { method: 'HEAD', cache: 'no-store' });
-         if (!res.ok) return;
-         const etag = res.headers.get('etag');
-         if (etag) {
-           const currentEtag = localStorage.getItem('app_etag');
-           if (currentEtag && currentEtag !== etag) {
-             window.location.reload(); // Force reload if version changes
-           } else {
-             localStorage.setItem('app_etag', etag);
-           }
-         }
-      } catch (e) {
-         // ignore network errors for polling
+        const res = await fetch(`${basePath}/`, { method: 'HEAD', cache: 'no-store' });
+        if (!res.ok) return;
+        const etag = res.headers.get('etag');
+        if (!etag) return;
+        const currentEtag = localStorage.getItem('app_etag');
+        if (currentEtag && currentEtag !== etag) {
+          // A second status check protects against a match that started while
+          // the HEAD request was in flight.
+          if (useMatchStore.getState().status !== 'idle') return;
+          localStorage.setItem('app_etag', etag);
+          window.location.reload();
+        } else {
+          localStorage.setItem('app_etag', etag);
+        }
+      } catch {
+        // A failed version check must never interrupt chat.
       }
     }, 5 * 60 * 1000);
     
