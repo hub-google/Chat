@@ -6,7 +6,8 @@ import { WebRTCManager } from '../lib/webrtc';
 import { supabase } from '../lib/supabase';
 import { TopicCards } from './TopicCards';
 import { Send, Image as ImageIcon, LogOut, CheckCircle2, CheckCheck, Sparkles, AlertTriangle } from 'lucide-react';
-import { saveToIDB, getAllFromIDB, deleteFromIDB } from '../lib/idb';
+import type { StoredChatMessage } from '../lib/idb';
+import { OUTBOX_UPDATED, stageMessage, uploadStagedMessage, type OutboxResult } from '../lib/messageOutbox';
 import { env } from '../lib/env';
 import { getUserId } from '../lib/user';
 import Image from 'next/image';
@@ -50,6 +51,8 @@ export function ChatWindow() {
   const lastTypingSentAt = useRef(0);
   const myUserId = useRef<string | null>(null);
   const openingMessageSent = useRef(false);
+  const sendBusy = useRef(false);
+  const lastSendAt = useRef(0);
   const pendingSaves = useRef<Set<Promise<void>>>(new Set());
   const takeoverRole = useRef<'target' | 'remaining' | null>(null);
 
@@ -98,31 +101,22 @@ export function ChatWindow() {
     };
   }, []);
 
+  // Outbox recovery runs for the entire app, even after this chat unmounts.
+  // This view only reflects delivery status for its currently visible messages.
   useEffect(() => {
-    if (status !== 'chatting' || !matchId) return;
-    let retrying = false;
-    const retryQueued = async () => {
-      if (retrying || !navigator.onLine) return;
-      retrying = true;
-      try {
-        const failed = await getAllFromIDB();
-        for (const msg of failed) {
-          if (msg.match_id !== matchId) continue;
-          const { error } = await supabase.from('messages').insert(msg);
-          if (!error || error.code === '23505') {
-            await deleteFromIDB(msg.id);
-            setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'saved', error: undefined } : m));
-          }
-        }
-      } finally {
-        retrying = false;
-      }
+    const update = (event: Event) => {
+      const detail = (event as CustomEvent<{id: string; status: OutboxResult['status']; error?: string}>).detail;
+      if (!detail?.id) return;
+      setMessages(previous => previous.map(message => message.id !== detail.id
+        ? message
+        : { ...message,
+            status: detail.status === 'saved' ? 'saved' : 'failed',
+            error: detail.error,
+          }));
     };
-    window.addEventListener('online', retryQueued);
-    void retryQueued();
-    const timer = setInterval(() => { void retryQueued(); }, 4000);
-    return () => { clearInterval(timer); window.removeEventListener('online', retryQueued); };
-  }, [status, matchId]);
+    window.addEventListener(OUTBOX_UPDATED, update);
+    return () => window.removeEventListener(OUTBOX_UPDATED, update);
+  }, []);
 
   useEffect(() => {
     if (connectionState === 'p2p' || connectionState === 'fallback') {
@@ -190,17 +184,6 @@ export function ChatWindow() {
     }
   }, [matchId, status]);
 
-  useEffect(() => {
-    const handleUnload = (e: BeforeUnloadEvent) => {
-      const hasUnsaved = messages.some(m => m.sender === 'me' && m.status !== 'saved');
-      if (hasUnsaved) {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [messages]);
 
   const handleLeave = useCallback(async (force = false) => {
     if (!force && !await ask('確定要離開聊天室嗎？')) return;
@@ -397,48 +380,58 @@ export function ChatWindow() {
     }
   };
 
-  const saveToDB = async (msg: Message) => {
-    if (!matchId || !myUserId.current) {
-      setMessages((prev) => prev.map((item) => item.id === msg.id ? { ...item, status: 'failed', error: '聊天室身分尚未就緒' } : item));
-      return;
-    }
-    const payload = {
-      id: msg.id,
-      match_id: matchId,
-      sender_id: myUserId.current,
-      content: msg.text || msg.imageUrl,
-      type: msg.imageUrl ? 'image' : 'text'
-    };
-    const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), 7000);
-    let error: { code?: string; message: string } | null = null;
+  /**
+   * Commit locally before exposing the message to the peer. A failed IndexedDB
+   * write must not be presented as a successfully sent, recoverable message.
+   */
+  const sendLocalMessage = async (message: Message): Promise<boolean> => {
+    if (!matchId || status !== 'chatting' || peerLeft || takeoverRole.current === 'target') return false;
+    let userId: string;
     try {
-      const response = await supabase.from('messages').insert(payload).abortSignal(abort.signal);
-      error = response.error;
-    } catch (cause) {
-      error = { message: cause instanceof Error ? cause.message : '網路連線中斷' };
-    } finally {
-      clearTimeout(timeout);
+      userId = myUserId.current ?? await getUserId();
+      myUserId.current = userId;
+    } catch {
+      setNotice('無法確認匿名身分，訊息尚未送出');
+      return false;
     }
-
-    if (error && error.code !== '23505') {
-      if (error.code === '42501' || error.message.includes('policy')) {
-        setMessages(prev => prev.map(item => item.id === msg.id ? { ...item, status: 'failed', error: '沒有儲存權限，訊息未寫入資料庫' } : item));
-        return;
-      }
-      
-      await saveToIDB(payload);
-      
-      setMessages((prev) => prev.map((item) => item.id === msg.id ? { ...item, status: 'failed', error: '連線中斷，已儲存至離線佇列' } : item));
-    } else {
-      setMessages((prev) => prev.map((item) => item.id === msg.id ? { ...item, status: 'saved', error: undefined } : item));
+    const content = message.text ?? message.imageUrl ?? '';
+    const payload: StoredChatMessage = {
+      id: message.id,
+      match_id: matchId,
+      sender_id: userId,
+      content,
+      type: message.imageUrl ? 'image' : 'text',
+    };
+    try {
+      await stageMessage(payload);
+    } catch (error) {
+      setNotice('瀏覽器無法保存離線訊息，已取消傳送，請檢查儲存空間與隱私模式');
+      console.error('Local message persistence failed', error);
+      return false;
     }
-  };
-
-  const queueSave = (msg: Message) => {
-    const task = saveToDB(msg);
+    setMessages(previous => [...previous, message]);
+    rtcManager.current?.sendMessage({ type: 'chat', message });
+    rtcManager.current?.sendMessage({ type: 'typing', isTyping: false });
+    const task = uploadStagedMessage(payload).then(() => undefined);
     pendingSaves.current.add(task);
     void task.finally(() => pendingSaves.current.delete(task));
+    return true;
+  };
+
+  const retryMessage = async (message: Message) => {
+    if (!matchId) return;
+    const userId = myUserId.current ?? await getUserId();
+    const payload: StoredChatMessage = {
+      id: message.id,
+      match_id: matchId,
+      sender_id: userId,
+      content: message.text ?? message.imageUrl ?? '',
+      type: message.imageUrl ? 'image' : 'text',
+    };
+    const outcome = await uploadStagedMessage(payload);
+    if (outcome.status !== 'saved') {
+      setNotice(outcome.error ?? '補傳仍未完成');
+    }
   };
 
   const submitReport = async () => {
@@ -464,71 +457,73 @@ export function ChatWindow() {
     setReportDetails('');
   };
 
-  async function handleSendText(text: string) {
-    if (!text) return;
-
-    if (takeoverRole.current === 'target') {
-      setPeerLeft(true);
-      setNotice('對方已離開');
-      return;
+  async function handleSendText(text: string): Promise<boolean> {
+    if (!text.trim() || peerLeft || status !== 'chatting' || takeoverRole.current === 'target') return false;
+    if (text.length > 4000) {
+      setNotice('文字訊息不可超過 4,000 字');
+      return false;
     }
-
-    const sensitiveWords = /匯款|點數|投資|買賣|詐騙|援交/;
-    if (sensitiveWords.test(text)) {
-      setNotice('系統警示：系統偵測到敏感字詞，請注意不要匯款或提供個人資料，防範詐騙！');
-    }
-
-    // 防範連點發送訊息的 Race Condition
     const now = Date.now();
-    if (now - (window as any)._lastSendTime < 300) return;
-    (window as any)._lastSendTime = now;
-
-    const newMsg: Message = {
+    if (now - lastSendAt.current < 300) return false;
+    lastSendAt.current = now;
+    if (/匯款|點數|投資|買賣|詐騙|援交/.test(text)) {
+      setNotice('防詐提醒：請勿向陌生人匯款或提供個人資料。');
+    }
+    return sendLocalMessage({
       id: crypto.randomUUID(),
       sender: 'me',
-      text: text,
-      timestamp: Date.now(),
-      status: 'sent'
-    };
-    setMessages((prev) => [...prev, newMsg]);
-    rtcManager.current?.sendMessage({ type: 'chat', message: newMsg });
-    rtcManager.current?.sendMessage({ type: 'typing', isTyping: false });
-    queueSave(newMsg);
-  };
+      text,
+      timestamp: now,
+      status: 'sent',
+    });
+  }
 
   const handleSend = () => {
-    if (!input.trim() && !isUploading) return;
-    void handleSendText(input.trim());
-    setInput('');
+    const text = input.trim();
+    if (!text || sendBusy.current || peerLeft) return;
+    sendBusy.current = true;
+    void handleSendText(text).then((sent) => {
+      if (sent) setInput(previous => previous.trim() === text ? '' : previous);
+    }).catch((error) => {
+      setNotice(error instanceof Error ? error.message : '訊息暫時無法送出');
+    }).finally(() => { sendBusy.current = false; });
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || peerLeft) return;
 
     setIsUploading(true);
 
     try {
+      if (!file.type.startsWith('image/') || file.size > 15 * 1024 * 1024) {
+        throw new Error('請上傳 15 MB 以下的圖片');
+      }
       const compressedBlob = await new Promise<Blob>((resolve, reject) => {
         const img = document.createElement('img');
-        img.src = URL.createObjectURL(file);
+        const objectUrl = URL.createObjectURL(file);
+        img.src = objectUrl;
         img.onload = () => {
+          URL.revokeObjectURL(objectUrl);
           const canvas = document.createElement('canvas');
           let { width, height } = img;
-          if (width > 1024) {
-            height = Math.round((height * 1024) / width);
-            width = 1024;
-          }
+          const scale = Math.min(1, 1024 / Math.max(width, height));
+          width = Math.max(1, Math.round(width * scale));
+          height = Math.max(1, Math.round(height * scale));
           canvas.width = width;
           canvas.height = height;
           const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0, width, height);
+          if (!ctx) {
+            reject(new Error('無法壓縮圖片'));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
           canvas.toBlob((blob) => {
             if (blob) resolve(blob);
             else reject(new Error('Canvas toBlob failed'));
           }, 'image/jpeg', 0.8);
         };
-        img.onerror = () => reject(new Error('Image load error'));
+        img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Image load error')); };
       });
 
       const formData = new FormData();
@@ -549,21 +544,22 @@ export function ChatWindow() {
       
       if (!res.ok || !data.success) throw new Error(data?.error?.message || `圖片服務回傳 ${res.status}`);
       if (data.success) {
-        const newMsg: Message = {
+        const url = new URL(data?.data?.url);
+        if (url.protocol !== 'https:') throw new Error('圖片服務回傳不安全的連結');
+        const delivered = await sendLocalMessage({
           id: crypto.randomUUID(),
           sender: 'me',
-          imageUrl: data.data.url,
+          imageUrl: url.href,
           timestamp: Date.now(),
-          status: 'sent'
-        };
-        setMessages((prev) => [...prev, newMsg]);
-        rtcManager.current?.sendMessage({ type: 'chat', message: newMsg });
-        queueSave(newMsg);
+          status: 'sent',
+        });
+        if (!delivered) setNotice('圖片上傳完成，但訊息尚未傳送');
       }
     } catch (error) {
       console.error('Image upload failed', error);
       setNotice(error instanceof Error ? `圖片上傳失敗：${error.message}` : '圖片上傳失敗。');
     } finally {
+      e.target.value = '';
       setIsUploading(false);
     }
   };
@@ -639,9 +635,10 @@ export function ChatWindow() {
             {m.sender === 'me' && (
               <div style={{ fontSize: '10px', color: 'var(--text-secondary)', textAlign: 'right', marginTop: '4px' }}>
                 {m.status === 'sent' && <><CheckCircle2 size={12} style={{ display: 'inline', verticalAlign: 'middle' }}/> 已發送</>}
-                {(m.status === 'delivered' || m.status === 'saved') && <><CheckCheck size={12} style={{ display: 'inline', verticalAlign: 'middle', color: 'var(--color-primary)' }}/> 已送達</>}
+                {m.status === 'delivered' && <><CheckCheck size={12} style={{ display: 'inline', verticalAlign: 'middle', color: 'var(--color-primary)' }}/> 已送達，儲存中</>}
+                {m.status === 'saved' && <><CheckCheck size={12} style={{ display: 'inline', verticalAlign: 'middle', color: 'var(--color-primary)' }}/> 已儲存</>}
                 {m.status === 'failed' && (
-                  <button onClick={() => queueSave(m)} title={m.error} style={{ border: 0, background: 'transparent', color: '#dc2626', cursor: 'pointer', fontSize: 10 }}>
+                  <button onClick={() => { void retryMessage(m); }} title={m.error} style={{ border: 0, background: 'transparent', color: '#dc2626', cursor: 'pointer', fontSize: 10 }}>
                     儲存失敗，點此重試
                   </button>
                 )}
@@ -677,7 +674,7 @@ export function ChatWindow() {
       {showTopicCards && (
         <TopicCards 
           onClose={() => setShowTopicCards(false)} 
-          onSelectTopic={(topic) => handleSendText(`[破冰話題] ${topic}`)} 
+          onSelectTopic={(topic) => { void handleSendText(`[破冰話題] ${topic}`); }} 
         />
       )}
 
