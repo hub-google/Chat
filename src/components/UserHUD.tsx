@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase';
 import { generateDeviceFingerprint } from '../lib/fingerprint';
 import { getUserId } from '../lib/user';
 import { getIpLocation } from '../lib/ipLocation';
+import { getClientDeviceDetails } from '../lib/clientDevice';
 
 export function UserHUD() {
   const { status, setStatus, setMatch, intent, setIntent, distanceMode, distanceKm, openingMessage, setOpeningMessage } = useMatchStore();
@@ -176,6 +177,9 @@ export function UserHUD() {
       const fingerprint = await generateDeviceFingerprint();
       const userId = await getUserId();
       userIdRef.current = userId;
+      const { data: allowed, error: accessError } = await supabase.rpc('tunnel_access_allowed');
+      if (accessError) throw new Error(`無法檢查使用權限：${accessError.message}`);
+      if (allowed !== true) throw new Error('此 IP 已被管理員暫時封鎖，禁止進入聊天室。');
       const ipLocation = await getIpLocation();
 
       let lat = null;
@@ -213,6 +217,7 @@ export function UserHUD() {
         .from('profiles')
         .update({
           device_fingerprint: fingerprint,
+          ...getClientDeviceDetails(),
           ...(ipLocation ? {
             last_ip: ipLocation.ip,
             last_ip_location_zh: ipLocation.locationZh,
