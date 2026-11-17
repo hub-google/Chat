@@ -173,27 +173,41 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
 
   useEffect(() => { if (authState === 'allowed') startTransition(() => { void refresh(); }); }, [authState, view]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Only admins poll aggregate presence; normal users hold no Realtime socket.
   useEffect(() => {
     if (authState !== 'allowed') return;
-    const currentCount = Number(document.documentElement.dataset.onlineCount ?? 0);
-    startTransition(() => setStats((previous) => ({ ...previous, activeUsers: currentCount })));
-    const updateCount = (event: Event) => setStats((previous) => ({ ...previous, activeUsers: (event as CustomEvent<number>).detail }));
-    window.addEventListener('site-online-count', updateCount);
-    return () => window.removeEventListener('site-online-count', updateCount);
+    let active = true;
+    const refreshCount = async () => {
+      const [rooms, waiting] = await Promise.all([
+        supabase.from('matches').select('id', { count: 'exact', head: true }).eq('is_active', true),
+        supabase.from('matching_pool').select('id', { count: 'exact', head: true }).eq('status', 'waiting'),
+      ]);
+      if (active && !rooms.error && !waiting.error) {
+        setStats(previous => ({ ...previous, activeUsers: 2 * (rooms.count ?? 0) + (waiting.count ?? 0) }));
+      }
+    };
+    void refreshCount();
+    const timer = setInterval(() => { void refreshCount(); }, 20000);
+    return () => { active = false; clearInterval(timer); };
   }, [authState]);
 
   useEffect(() => { if (authState === 'allowed' && view === 'analytics') startTransition(() => { void fetchAnalytics(); }); }, [analyticsRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!monitorMatchId) return;
-    void supabase.from('messages').select('*').eq('match_id', monitorMatchId).order('created_at', { ascending: true }).limit(50)
-      .then(({ data }) => setMonitorMessages((data ?? []) as MessageRow[]));
-    const channel = supabase.channel(`admin_monitor_${monitorMatchId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `match_id=eq.${monitorMatchId}` }, (payload) => {
-        setMonitorMessages((previous) => [...previous, payload.new as MessageRow]);
-      }).subscribe();
-    return () => { void supabase.removeChannel(channel); };
-  }, [monitorMatchId]);
+    if (!monitorMatchId || authState !== 'allowed') return;
+    let active = true;
+    const refreshMessages = async () => {
+      const { data } = await supabase.from('messages')
+        .select('id,sender_id,content,type,created_at')
+        .eq('match_id', monitorMatchId)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (active && data) setMonitorMessages((data as MessageRow[]).reverse());
+    };
+    void refreshMessages();
+    const timer = setInterval(() => { void refreshMessages(); }, 3000);
+    return () => { active = false; clearInterval(timer); };
+  }, [monitorMatchId, authState]);
 
   async function terminateSession(matchId: string) {
     const reason = await ask('終止此聊天室', true);
@@ -207,10 +221,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
     if (!reason) return;
     const { error } = await supabase.rpc('admin_takeover_session', { p_match_id: matchId, p_target_user_id: targetUserId, p_reason: reason });
     if (error) setErrorMsg(error.message); else {
-      const takeoverChannel = supabase.channel(`takeover_notice_${matchId}`);
-      await new Promise<void>((resolve) => takeoverChannel.subscribe((status) => { if (status === 'SUBSCRIBED') resolve(); }));
-      await takeoverChannel.send({ type: 'broadcast', event: 'admin_takeover', payload: { targetUserId } });
-      void supabase.removeChannel(takeoverChannel);
+      // Participants detect the takeover on their independent room status poll.
       setTakeover({ matchId, targetUserId });
       setSelectedMatchId(null);
       setMonitorMessages([]);
