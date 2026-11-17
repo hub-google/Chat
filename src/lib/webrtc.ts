@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { parsePeerEvent, type PeerEvent } from './chatProtocol';
 import { getUserId } from './user';
 
 type ConnectionState = 'open' | 'closed';
@@ -16,10 +17,10 @@ export class WebRTCManager {
   private negotiationId: string | null = null;
   private handshakeTimeout: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
-  private onMessage: (message: any) => void;
+  private onMessage: (message: PeerEvent) => void;
   private onConnectionState: (state: ConnectionState) => void;
 
-  constructor(onMessage: (message: any) => void, onConnectionState: (state: ConnectionState) => void = () => {}) {
+  constructor(onMessage: (message: PeerEvent) => void, onConnectionState: (state: ConnectionState) => void = () => {}) {
     this.onMessage = onMessage;
     this.onConnectionState = onConnectionState;
   }
@@ -184,8 +185,8 @@ export class WebRTCManager {
     this.dataChannel.onmessage = (event) => {
       if (typeof event.data !== 'string' || event.data.length > 25000) return;
       try {
-        const parsed = JSON.parse(event.data);
-        if (parsed && typeof parsed === 'object') this.onMessage(parsed);
+        const parsed = parsePeerEvent(JSON.parse(event.data));
+        if (parsed) this.onMessage(parsed);
       } catch {
         console.warn('Dropped malformed P2P message');
       }
