@@ -130,7 +130,7 @@ BEGIN
   SELECT regexp_replace(btrim(m.content), '[[:space:]]+', ' ', 'g') AS phrase,
          count(*) AS message_count,
          count(DISTINCT m.sender_id) AS sender_count,
-         count(DISTINCT COALESCE(s.ip,private.tunnel_safe_ip(p.last_ip))) AS ip_count
+         count(DISTINCT CASE WHEN s.ip_source='gateway' THEN s.ip END) AS ip_count
   FROM public.messages m
   LEFT JOIN private.tunnel_message_sources s ON s.message_id=m.id
   LEFT JOIN public.profiles p ON p.id=m.sender_id
@@ -205,13 +205,14 @@ BEGIN
      THEN RAISE EXCEPTION 'Invalid moderation request'; END IF;
   v_own_ip:=public.tunnel_request_ip();
   WITH sources AS (
-    SELECT DISTINCT COALESCE(s.ip,private.tunnel_safe_ip(p.last_ip)) AS ip
+    SELECT DISTINCT s.ip AS ip
     FROM public.messages m
     LEFT JOIN private.tunnel_message_sources s ON s.message_id=m.id
     LEFT JOIN public.profiles p ON p.id=m.sender_id
     WHERE m.type='text' AND m.created_at >= now()-make_interval(hours=>p_hours)
       AND regexp_replace(btrim(m.content),'[[:space:]]+',' ','g')=p_phrase
       AND COALESCE(p.role,'user')<>'admin'
+      AND s.ip_source='gateway'
   ), changed AS (
     INSERT INTO private.tunnel_ip_bans(ip,expires_at,reason,created_by)
       SELECT ip,now()+v_period,'常見文字：'||left(p_phrase,300),auth.uid()
