@@ -162,7 +162,7 @@ BEGIN
       AND regexp_replace(btrim(m.content),'[[:space:]]+',' ','g')=p_phrase
       AND COALESCE(p.role,'user')<>'admin'
   )
-  SELECT h.src_ip::TEXT,
+  SELECT host(h.src_ip),
          CASE WHEN bool_and(h.quality='gateway') THEN 'gateway' ELSE 'estimated' END,
          NULLIF(split_part(max(h.loc),'／',1),''),
          NULLIF(split_part(max(h.loc),'／',2),''),
@@ -230,7 +230,7 @@ RETURNS TABLE(ip TEXT, expires_at TIMESTAMPTZ, reason TEXT, created_at TIMESTAMP
 LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = pg_catalog,public,private AS $$
 BEGIN
   IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
-  RETURN QUERY SELECT b.ip::TEXT,b.expires_at,b.reason,b.created_at,b.expires_at>now()
+  RETURN QUERY SELECT host(b.ip),b.expires_at,b.reason,b.created_at,b.expires_at>now()
   FROM private.tunnel_ip_bans b ORDER BY (b.expires_at>now()) DESC,b.created_at DESC LIMIT 300;
 END;
 $$;
