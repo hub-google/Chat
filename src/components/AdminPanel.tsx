@@ -79,6 +79,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   const [monitorMessages, setMonitorMessages] = useState<MessageRow[]>([]);
   const [takeover, setTakeover] = useState<{ matchId: string; targetUserId: string } | null>(null);
   const [takeoverMsg, setTakeoverMsg] = useState('');
+  const [adminUserId, setAdminUserId] = useState<string | null>(null);
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('30d');
 
   const selectedSession = useMemo(() => sessions.find((item) => item.id === selectedMatchId) ?? null, [sessions, selectedMatchId]);
@@ -121,10 +122,9 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
     const since = analyticsRange === 'today' ? new Date(new Date().setHours(0, 0, 0, 0)).toISOString() : analyticsRange === '7d' ? new Date(Date.now() - 7 * 86400000).toISOString() : analyticsRange === '30d' ? new Date(Date.now() - 30 * 86400000).toISOString() : null;
     let matchesQuery = supabase.from('matches').select('*', { count: 'exact', head: true });
     if (since) matchesQuery = matchesQuery.gte('created_at', since);
-    const [matchesResult, reportsResult] = await Promise.all([
-      matchesQuery,
-      supabase.from('chat_reports').select('*', { count: 'exact', head: true }),
-    ]);
+    let reportsQuery = supabase.from('chat_reports').select('*', { count: 'exact', head: true });
+    if (since) reportsQuery = reportsQuery.gte('created_at', since);
+    const [matchesResult, reportsResult] = await Promise.all([matchesQuery, reportsQuery]);
     const firstError = matchesResult.error || reportsResult.error;
     if (firstError) setErrorMsg(`無法載入分析資料：${firstError.message}`);
     setStats((previous) => ({ totalMatches: matchesResult.count ?? 0, activeUsers: previous.activeUsers, totalReports: reportsResult.count ?? 0 }));
@@ -136,7 +136,8 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   useEffect(() => {
     void (async () => {
       try {
-        await ensureUser();
+        const currentUser = await ensureUser();
+        setAdminUserId(currentUser.id);
         const { data: alreadyAdmin, error: adminCheckError } = await supabase.rpc('is_admin');
         if (adminCheckError) throw adminCheckError;
 
@@ -254,6 +255,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
 
   async function sendTakeoverMessage() {
     if (!takeover || !takeoverMsg.trim()) return;
+    if (takeoverMsg.trim().length > 4000) { setErrorMsg('訊息不得超過 4,000 字'); return; }
     // Audit messages using the actual administrator ID. Never forge the
     // removed participant's sender_id in the permanent conversation record.
     const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -273,9 +275,14 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
   }
 
   async function banUser(userId: string) {
-    if (!await ask('確定要封鎖此使用者嗎？')) return;
-    const { error } = await supabase.from('profiles').update({ status: 'banned' }).eq('id', userId);
-    if (error) setErrorMsg(error.message); else await fetchReports();
+    if (!await ask('封鎖此使用者並立即終止其進行中的聊天室？')) return;
+    const { data, error } = await supabase.rpc('tunnel_admin_ban_user', { p_user_id: userId });
+    if (error || data !== true) {
+      setErrorMsg(error?.message ?? '找不到要封鎖的使用者');
+      return;
+    }
+    await fetchReports();
+    await fetchSessions();
   }
 
   async function dismissReport(reportId: string) {
@@ -315,7 +322,7 @@ export function AdminPanel({ view = 'sessions' }: { view?: AdminView }) {
       </main>
 
       {selectedSession && <ProfileDrawer session={selectedSession} profiles={profiles} onClose={() => setSelectedMatchId(null)} onTakeover={handleTakeover} />}
-      {monitorMatchId && <MonitorDrawer matchId={monitorMatchId} messages={monitorMessages} takeover={takeover?.matchId === monitorMatchId ? takeover : null} value={takeoverMsg} onValueChange={setTakeoverMsg} onSend={sendTakeoverMessage} onEndTakeover={() => { void endTakeover(); }} onClose={() => { setMonitorMatchId(null); setMonitorMessages([]); }} />}
+      {monitorMatchId && <MonitorDrawer matchId={monitorMatchId} messages={monitorMessages} adminUserId={adminUserId} takeover={takeover?.matchId === monitorMatchId ? takeover : null} value={takeoverMsg} onValueChange={setTakeoverMsg} onSend={sendTakeoverMessage} onEndTakeover={() => { void endTakeover(); }} onClose={() => { setMonitorMatchId(null); setMonitorMessages([]); }} />}
     </div>
   );
 }
@@ -355,8 +362,8 @@ function AnalyticsView({ stats, loading }: { stats: { totalMatches: number; acti
   return <><section className={styles.analyticsGrid}>{cards.map((card) => <article className={styles.metricCard} key={card.label}><span className={`${styles.metricIcon} ${styles[card.tone]}`}><card.icon size={21} /></span><div><span>{card.label}</span><strong>{loading ? '—' : card.value.toLocaleString('zh-TW')}</strong></div></article>)}</section><section className={styles.panel}><div className={styles.panelHeading}><div><h2>平台概況</h2><p>此頁只顯示分析資料，不會混入連線場次清單。</p></div></div><div className={styles.insight}><BarChart3 size={40} /><div><strong>即時營運摘要</strong><p>目前平均每個有效配對包含 2 位使用者；檢舉率為 {stats.totalMatches ? ((stats.totalReports / stats.totalMatches) * 100).toFixed(1) : '0.0'}%。</p></div></div></section></>;
 }
 
-function MonitorDrawer({ matchId, messages, takeover, value, onValueChange, onSend, onEndTakeover, onClose }: { matchId: string; messages: MessageRow[]; takeover: { matchId: string; targetUserId: string } | null; value: string; onValueChange: (value: string) => void; onSend: () => Promise<void>; onEndTakeover: () => void; onClose: () => void }) {
+function MonitorDrawer({ matchId, messages, adminUserId, takeover, value, onValueChange, onSend, onEndTakeover, onClose }: { matchId: string; messages: MessageRow[]; adminUserId: string | null; takeover: { matchId: string; targetUserId: string } | null; value: string; onValueChange: (value: string) => void; onSend: () => Promise<void>; onEndTakeover: () => void; onClose: () => void }) {
   const visibleMessages = messages.filter((message) => message.type !== 'system');
-  const otherUserId = visibleMessages.find((message) => message.sender_id !== takeover?.targetUserId)?.sender_id;
-  return <div className={styles.drawerBackdrop} onMouseDown={onClose}><aside className={`${styles.drawer} ${styles.monitorDrawer} ${takeover ? 'admin-takeover-drawer' : ''}`} onMouseDown={(event) => event.stopPropagation()}><header className="support-header"><div className="support-avatar"><UserRound size={21} /></div><div className="support-contact"><span>{takeover ? '接管對話進行中' : '即時對話監看'}</span><h2>{otherUserId ? `匿名使用者 ${shortId(otherUserId)}` : `場次 ${shortId(matchId)}`}</h2><small><i /> 即時連線 · 場次 {shortId(matchId)}</small></div>{takeover && <div className="support-identity"><span>目前回覆身分</span><strong>{shortId(takeover.targetUserId)}</strong></div>}<button className="support-close" onClick={onClose} aria-label="關閉"><X size={20} /></button></header><div className={`${styles.messages} support-messages`}>{visibleMessages.length === 0 ? <div className={styles.empty}>目前尚無訊息</div> : visibleMessages.map((message) => { const impersonated = takeover?.targetUserId === message.sender_id; return <div className={`${styles.message} ${impersonated ? 'admin-impersonated-message' : ''}`} key={message.id}><strong>{impersonated ? '我方（接管身分）' : `對方 ${shortId(message.sender_id)}`}</strong>{message.type === 'image' ? <img className="admin-message-image" src={message.content} alt="對話圖片" /> : <p>{message.content}</p>}<time>{message.created_at ? new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at)) : ''}</time></div>; })}</div>{takeover && <div className="admin-takeover-composer"><div className="support-compose-label"><span>以 {shortId(takeover.targetUserId)} 身分回覆</span><small>Enter 送出 · Shift + Enter 換行</small></div><textarea value={value} onChange={(event) => onValueChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder="輸入回覆內容…" autoFocus /><button className="admin-send-takeover" onClick={() => void onSend()} aria-label="送出訊息"><Send size={18} /><span>送出</span></button><button className="admin-end-takeover" onClick={onEndTakeover}>結束接管並關閉聊天室</button></div>}</aside></div>;
+  const otherUserId = visibleMessages.find((message) => message.sender_id !== takeover?.targetUserId && message.sender_id !== adminUserId)?.sender_id;
+  return <div className={styles.drawerBackdrop} onMouseDown={onClose}><aside className={`${styles.drawer} ${styles.monitorDrawer} ${takeover ? 'admin-takeover-drawer' : ''}`} onMouseDown={(event) => event.stopPropagation()}><header className="support-header"><div className="support-avatar"><UserRound size={21} /></div><div className="support-contact"><span>{takeover ? '接管對話進行中' : '即時對話監看'}</span><h2>{otherUserId ? `匿名使用者 ${shortId(otherUserId)}` : `場次 ${shortId(matchId)}`}</h2><small><i /> 即時連線 · 場次 {shortId(matchId)}</small></div>{takeover && <div className="support-identity"><span>管理員接管中</span><strong>{shortId(adminUserId)}</strong></div>}<button className="support-close" onClick={onClose} aria-label="關閉"><X size={20} /></button></header><div className={`${styles.messages} support-messages`}>{visibleMessages.length === 0 ? <div className={styles.empty}>目前尚無訊息</div> : visibleMessages.map((message) => { const fromAdmin = adminUserId === message.sender_id; return <div className={`${styles.message} ${fromAdmin ? 'admin-impersonated-message' : ''}`} key={message.id}><strong>{fromAdmin ? '管理員' : takeover?.targetUserId === message.sender_id ? '原使用者' : `使用者 ${shortId(message.sender_id)}`}</strong>{message.type === 'image' ? <img className="admin-message-image" src={message.content} alt="對話圖片" /> : <p>{message.content}</p>}<time>{message.created_at ? new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at)) : ''}</time></div>; })}</div>{takeover && <div className="admin-takeover-composer"><div className="support-compose-label"><span>以管理員身分回覆（對方會看到聊天訊息）</span><small>Enter 送出 · Shift + Enter 換行</small></div><textarea maxLength={4000} value={value} onChange={(event) => onValueChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void onSend(); } }} placeholder="輸入回覆內容…" autoFocus /><button className="admin-send-takeover" onClick={() => void onSend()} aria-label="送出訊息"><Send size={18} /><span>送出</span></button><button className="admin-end-takeover" onClick={onEndTakeover}>結束接管並關閉聊天室</button></div>}</aside></div>;
 }

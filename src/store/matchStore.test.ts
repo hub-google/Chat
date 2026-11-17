@@ -32,3 +32,29 @@ describe('MatchStore', () => {
     expect(useMatchStore.getState().matchId).toBeNull();
   });
 });
+
+describe('match-store hydration', () => {
+  it('never restores a queue that has no matching heartbeat after reload', async () => {
+    localStorage.setItem('match-storage', JSON.stringify({
+      state: { status: 'waiting', matchId: null, intent: 'venting', distanceMode: 'unlimited' },
+      version: 0,
+    }));
+    await useMatchStore.persist.rehydrate();
+    const state = useMatchStore.getState();
+    expect(state.status).toBe('idle');
+    expect(state.matchId).toBeNull();
+    expect(state.intent).toBe('venting');
+    useMatchStore.getState().reset();
+  });
+
+  it('restores a chatting room so it can be checked against the database', async () => {
+    localStorage.setItem('match-storage', JSON.stringify({
+      state: { status: 'chatting', matchId: 'test-room-id', intent: 'chill' },
+      version: 0,
+    }));
+    await useMatchStore.persist.rehydrate();
+    expect(useMatchStore.getState().status).toBe('chatting');
+    expect(useMatchStore.getState().matchId).toBe('test-room-id');
+    useMatchStore.getState().reset();
+  });
+});

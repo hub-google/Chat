@@ -65,6 +65,17 @@ export const useMatchStore = create<MatchState>()(
     },
     {
       name: 'match-storage',
+      // A waiting room cannot survive reload: the in-memory matching parameters
+      // and heartbeat are gone, so a persisted 'waiting' state would hang forever.
+      // A live chatting matchId is still restored and validated by ChatWindow.
+      merge: (persisted, current) => {
+        const merged = { ...current, ...(persisted as Partial<MatchState> | undefined) };
+        if (merged.status === 'waiting' || merged.status === 'matched' ||
+            merged.status === 'ended' || (merged.status === 'chatting' && !merged.matchId)) {
+          return { ...merged, status: 'idle' as const, matchId: null };
+        }
+        return merged;
+      },
     }
   )
 );

@@ -42,3 +42,10 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 `.github/workflows/backup.yml` 需設定 `SUPABASE_SERVICE_KEY`、`GDRIVE_CREDENTIALS`、`GDRIVE_FOLDER_ID`。目前歷史執行紀錄有因憑證缺失而失敗的情況；**未確認備份成功前不得視為有遠端備份**。該流程只在 Drive 校驗完成後才清理對應的資料庫訊息。管理後台不具備直接從 Drive 讀取已清理的歷史訊息功能。
 
 目前程式與安全測試不能代替實際的雙裝置連線、網路斷線和大量同時在線壓力測試。
+
+## 2026-11-17 進一步修正
+
+- 使用者封鎖由 `tunnel_admin_ban_user` 原子 RPC 執行；封鎖時同步關閉進行中的對話與等待佇列。既有正式資料庫的 `profiles_status_check` 已納入 `banned`，與主 SQL 定義一致。
+- 管理員「結束接管」改為實際終止聊天室，避免後台畫面結束但資料庫仍保持接管狀態。
+- 重整配對頁不會還原不可恢復的 `waiting` 狀態；進行中聊天室依既有 ID 驗證後恢復。
+- 管理後台的檢舉數現在依統計期間篩選。
