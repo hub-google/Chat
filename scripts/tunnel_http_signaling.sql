@@ -5,13 +5,14 @@ CREATE TABLE IF NOT EXISTS public.tunnel_webrtc_signals (
   sender_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   kind text NOT NULL CHECK (kind IN ('offer', 'answer')),
   sdp jsonb NOT NULL,
+  negotiation_id uuid,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (match_id, sender_id)
 );
 
 ALTER TABLE public.tunnel_webrtc_signals ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.tunnel_webrtc_signals FROM anon;
-GRANT SELECT, INSERT, UPDATE ON public.tunnel_webrtc_signals TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.tunnel_webrtc_signals TO authenticated;
 
 DROP POLICY IF EXISTS "Tunnel participants read signals" ON public.tunnel_webrtc_signals;
 CREATE POLICY "Tunnel participants read signals"
@@ -57,5 +58,19 @@ WITH CHECK (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
       AND auth.uid() = ANY(m.participants)
+  )
+);
+
+-- Participants may remove only their own active-room signaling records.
+DROP POLICY IF EXISTS "Tunnel participants remove own signal" ON public.tunnel_webrtc_signals;
+CREATE POLICY "Tunnel participants remove own signal"
+ON public.tunnel_webrtc_signals FOR DELETE TO authenticated
+USING (
+  sender_id = (SELECT auth.uid())
+  AND NOT (SELECT public.is_banned())
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = match_id AND m.is_active = TRUE
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
