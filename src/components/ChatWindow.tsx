@@ -302,6 +302,17 @@ export function ChatWindow() {
       // Match administration is low-frequency control-plane traffic. Active
       // P2P messages never go through these checks or the matching queue.
       const statusPoll = setInterval(async () => {
+        // IP bans are enforced by SQL policies for database writes. The browser
+        // also closes an existing P2P session when moderation changes mid-chat.
+        const { data: allowed, error: accessError } = await supabase.rpc('tunnel_access_allowed');
+        if (!accessError && allowed === false) {
+          rtcManager.current?.sendMessage({ type: 'leave' });
+          rtcManager.current?.close();
+          setConnectionState('fallback');
+          setPeerLeft(true);
+          setNotice('此 IP 已被管理員暫時封鎖，無法繼續聊天。');
+          return;
+        }
         const { data, error } = await supabase
           .from('matches')
           .select('is_active,is_taken_over,takeover_target')
