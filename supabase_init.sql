@@ -320,6 +320,7 @@ DROP POLICY IF EXISTS "Users manage own queue row" ON public.matching_pool;
 DROP POLICY IF EXISTS "Participants or admins can view matches" ON public.matches;
 DROP POLICY IF EXISTS "Messages read policy with takeover isolation" ON public.messages;
 DROP POLICY IF EXISTS "Current participants can insert room messages" ON public.messages;
+DROP POLICY IF EXISTS "Tunnel sender inserts current or recently ended messages" ON public.messages;
 DROP POLICY IF EXISTS "Users can create chat_reports" ON public.chat_reports;
 DROP POLICY IF EXISTS "Admins can review chat_reports" ON public.chat_reports;
 DROP POLICY IF EXISTS "Everyone can read active topic categories" ON public.topic_categories;
@@ -330,7 +331,7 @@ DROP POLICY IF EXISTS "Admins can access takeover logs" ON public.admin_takeover
 
 CREATE POLICY "Everyone can view profiles"
 ON public.profiles FOR SELECT TO authenticated
-USING (TRUE);
+USING ((SELECT auth.uid()) = id OR (SELECT public.is_admin()));
 
 CREATE POLICY "Users can update own profile"
 ON public.profiles FOR UPDATE TO authenticated
@@ -368,18 +369,28 @@ USING (
     )
 );
 
-CREATE POLICY "Current participants can insert room messages"
+CREATE POLICY "Tunnel sender inserts current or recently ended messages"
 ON public.messages FOR INSERT TO authenticated
 WITH CHECK (
-    NOT public.is_banned()
-    AND EXISTS (
-        SELECT 1 FROM public.matches
-        WHERE id = messages.match_id AND is_active = TRUE
-          AND (
-            (auth.uid() = sender_id AND auth.uid() = ANY(participants))
-            OR public.is_admin()
-          )
-    )
+  NOT (SELECT public.is_banned())
+  AND sender_id = (SELECT auth.uid())
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = messages.match_id
+      AND (
+        (m.is_active = TRUE AND (
+          (SELECT public.is_admin())
+          OR ((SELECT auth.uid()) = ANY(m.participants)
+             AND (NOT COALESCE(m.is_taken_over,FALSE) OR m.takeover_target IS DISTINCT FROM (SELECT auth.uid())))
+        ))
+        OR (
+          m.is_active = FALSE AND m.ended_reason = 'user_left'
+          AND COALESCE(m.is_taken_over,FALSE) = FALSE
+          AND m.ended_at > NOW() - INTERVAL '24 hours'
+          AND (SELECT auth.uid()) = ANY(m.participants)
+        )
+      )
+  )
 );
 
 CREATE POLICY "Users can create chat_reports"
@@ -457,117 +468,57 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 -- 4.1 高併發 RPC 配對預寫程序 (fn_match_user，支援越遠越好、距離過濾與選填欄位)
-CREATE OR REPLACE FUNCTION public.fn_match_user(
-    p_user_id UUID,
-    p_intent VARCHAR(20),
-    p_gender VARCHAR(10) DEFAULT NULL,
-    p_target_gender VARCHAR(10) DEFAULT 'any',
-    p_city VARCHAR(20) DEFAULT NULL,
-    p_age INTEGER DEFAULT NULL,
-    p_lat DOUBLE PRECISION DEFAULT NULL,
-    p_lng DOUBLE PRECISION DEFAULT NULL,
-    p_max_distance_km INTEGER DEFAULT NULL,
-    p_distance_mode VARCHAR(20) DEFAULT 'nearest'
-) RETURNS TABLE (
-    match_id UUID,
-    matched_user_id UUID
-) AS $$
-DECLARE
-    v_target_row RECORD;
-    v_new_match_id UUID;
+CREATE OR REPLACE FUNCTION public.fn_match_user(p_user_id uuid, p_intent character varying, p_gender character varying DEFAULT NULL::character varying, p_target_gender character varying DEFAULT 'any'::character varying, p_city character varying DEFAULT NULL::character varying, p_age integer DEFAULT NULL::integer, p_lat double precision DEFAULT NULL::double precision, p_lng double precision DEFAULT NULL::double precision, p_max_distance_km integer DEFAULT NULL::integer, p_distance_mode character varying DEFAULT 'nearest'::character varying)
+ RETURNS TABLE(match_id uuid, matched_user_id uuid)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE v_target_row RECORD; v_new_match_id UUID; v_existing public.matches%ROWTYPE;
 BEGIN
-    IF auth.uid() IS NULL OR auth.uid() <> p_user_id OR public.is_banned() THEN
-        RAISE EXCEPTION 'Not authorized to match this user.';
-    END IF;
+  IF auth.uid() IS NULL OR auth.uid() <> p_user_id OR public.is_banned() THEN
+    RAISE EXCEPTION 'Not authorized to match this user.';
+  END IF;
 
-    -- 尋找符合條件之第一個等待者 (原子鎖定與跳過已鎖定)
-    SELECT * INTO v_target_row
-    FROM public.matching_pool
-    WHERE status = 'waiting'
-      AND user_id != p_user_id
-      AND intent = p_intent
-      -- 性別篩選 (若為 any、NULL 或目標性別吻合)
-      AND (p_target_gender = 'any' OR p_target_gender IS NULL OR gender IS NULL OR gender = p_target_gender)
-      AND (target_gender = 'any' OR target_gender IS NULL OR p_gender IS NULL OR target_gender = p_gender)
-      -- 距離公里數過濾 (若雙方設定 max_distance_km 且均有 GPS，則計算距離小於等於限制)
-      AND (
-          p_max_distance_km IS NULL 
-          OR p_lat IS NULL 
-          OR p_lng IS NULL 
-          OR lat IS NULL 
-          OR lng IS NULL 
-          OR public.haversine_distance(p_lat, p_lng, lat, lng) <= p_max_distance_km
-      )
-      AND (
-          max_distance_km IS NULL 
-          OR p_lat IS NULL 
-          OR p_lng IS NULL 
-          OR lat IS NULL 
-          OR lng IS NULL 
-          OR public.haversine_distance(p_lat, p_lng, lat, lng) <= max_distance_km
-      )
-      AND (
-          p_distance_mode != 'farthest'
-          OR p_lat IS NULL 
-          OR p_lng IS NULL 
-          OR lat IS NULL 
-          OR lng IS NULL 
-          OR public.haversine_distance(p_lat, p_lng, lat, lng) >= 50
-      )
-      AND (
-          distance_mode != 'farthest'
-          OR p_lat IS NULL 
-          OR p_lng IS NULL 
-          OR lat IS NULL 
-          OR lng IS NULL 
-          OR public.haversine_distance(p_lat, p_lng, lat, lng) >= 50
-      )
-      AND last_ping_at > NOW() - INTERVAL '10 seconds'
-    ORDER BY 
-      CASE WHEN p_distance_mode = 'farthest' THEN public.haversine_distance(p_lat, p_lng, lat, lng) END DESC NULLS LAST,
-      created_at ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1;
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+  SELECT * INTO v_existing FROM public.matches
+    WHERE p_user_id = ANY(participants) AND is_active
+    ORDER BY created_at DESC LIMIT 1;
+  IF v_existing.id IS NOT NULL THEN
+    RETURN QUERY SELECT v_existing.id, (SELECT u FROM unnest(v_existing.participants) u WHERE u <> p_user_id LIMIT 1);
+    RETURN;
+  END IF;
+  SELECT * INTO v_target_row FROM public.matching_pool
+   WHERE status='waiting' AND user_id<>p_user_id AND intent=p_intent
+     AND (p_target_gender='any' OR p_target_gender IS NULL OR gender IS NULL OR gender=p_target_gender)
+     AND (target_gender='any' OR target_gender IS NULL OR p_gender IS NULL OR target_gender=p_gender)
+     AND (p_max_distance_km IS NULL OR (p_lat IS NOT NULL AND p_lng IS NOT NULL AND lat IS NOT NULL AND lng IS NOT NULL AND public.haversine_distance(p_lat,p_lng,lat,lng)<=p_max_distance_km))
+     AND (max_distance_km IS NULL OR (p_lat IS NOT NULL AND p_lng IS NOT NULL AND lat IS NOT NULL AND lng IS NOT NULL AND public.haversine_distance(p_lat,p_lng,lat,lng)<=max_distance_km))
+     AND (p_distance_mode<>'farthest' OR (p_lat IS NOT NULL AND p_lng IS NOT NULL AND lat IS NOT NULL AND lng IS NOT NULL AND public.haversine_distance(p_lat,p_lng,lat,lng)>=50))
+     AND (distance_mode<>'farthest' OR (p_lat IS NOT NULL AND p_lng IS NOT NULL AND lat IS NOT NULL AND lng IS NOT NULL AND public.haversine_distance(p_lat,p_lng,lat,lng)>=50))
+     AND last_ping_at>NOW()-INTERVAL '10 seconds'
+   ORDER BY CASE WHEN p_distance_mode='farthest' THEN public.haversine_distance(p_lat,p_lng,lat,lng) END DESC NULLS LAST, created_at ASC
+   FOR UPDATE SKIP LOCKED LIMIT 1;
 
-    IF v_target_row.id IS NOT NULL THEN
-        -- 建立配對房間
-        INSERT INTO public.matches (participants, intent, is_active, distance_km)
-        VALUES (
-          ARRAY[p_user_id, v_target_row.user_id], p_intent, TRUE,
-          CASE WHEN p_lat IS NOT NULL AND p_lng IS NOT NULL AND v_target_row.lat IS NOT NULL AND v_target_row.lng IS NOT NULL
-               THEN public.haversine_distance(p_lat, p_lng, v_target_row.lat, v_target_row.lng)
-               ELSE NULL END
-        )
-        RETURNING id INTO v_new_match_id;
-
-        -- 從配對池移除對方與自己
-        DELETE FROM public.matching_pool WHERE user_id IN (p_user_id, v_target_row.user_id);
-
-        -- 更新 profiles 狀態
-        UPDATE public.profiles SET status = 'chatting' WHERE id IN (p_user_id, v_target_row.user_id);
-
-        RETURN QUERY SELECT v_new_match_id, v_target_row.user_id;
-    ELSE
-        -- 無即時對象，將自己加入或更新配對池
-        INSERT INTO public.matching_pool (user_id, gender, target_gender, intent, city, age, lat, lng, max_distance_km, distance_mode, status, last_ping_at)
-        VALUES (p_user_id, p_gender, p_target_gender, p_intent, p_city, p_age, p_lat, p_lng, p_max_distance_km, p_distance_mode, 'waiting', NOW())
-        ON CONFLICT (user_id) DO UPDATE SET
-            gender = EXCLUDED.gender,
-            target_gender = EXCLUDED.target_gender,
-            intent = EXCLUDED.intent,
-            city = EXCLUDED.city,
-            age = EXCLUDED.age,
-            lat = EXCLUDED.lat,
-            lng = EXCLUDED.lng,
-            max_distance_km = EXCLUDED.max_distance_km,
-            distance_mode = EXCLUDED.distance_mode,
-            last_ping_at = NOW(),
-            status = 'waiting';
-
-        RETURN QUERY SELECT NULL::UUID, NULL::UUID;
-    END IF;
+  IF v_target_row.id IS NOT NULL THEN
+    INSERT INTO public.matches(participants,intent,is_active,distance_km)
+    VALUES (ARRAY[p_user_id,v_target_row.user_id],p_intent,TRUE,
+      CASE WHEN p_lat IS NOT NULL AND p_lng IS NOT NULL AND v_target_row.lat IS NOT NULL AND v_target_row.lng IS NOT NULL
+           THEN public.haversine_distance(p_lat,p_lng,v_target_row.lat,v_target_row.lng) ELSE NULL END)
+    RETURNING id INTO v_new_match_id;
+    DELETE FROM public.matching_pool WHERE user_id IN (p_user_id,v_target_row.user_id);
+    UPDATE public.profiles SET status='chatting' WHERE id IN (p_user_id,v_target_row.user_id);
+    RETURN QUERY SELECT v_new_match_id,v_target_row.user_id;
+  ELSE
+    INSERT INTO public.matching_pool(user_id,gender,target_gender,intent,city,age,lat,lng,max_distance_km,distance_mode,status,last_ping_at)
+    VALUES(p_user_id,p_gender,p_target_gender,p_intent,p_city,p_age,p_lat,p_lng,p_max_distance_km,p_distance_mode,'waiting',NOW())
+    ON CONFLICT(user_id) DO UPDATE SET gender=EXCLUDED.gender,target_gender=EXCLUDED.target_gender,intent=EXCLUDED.intent,
+      city=EXCLUDED.city,age=EXCLUDED.age,lat=EXCLUDED.lat,lng=EXCLUDED.lng,max_distance_km=EXCLUDED.max_distance_km,
+      distance_mode=EXCLUDED.distance_mode,last_ping_at=NOW(),status='waiting';
+    RETURN QUERY SELECT NULL::UUID,NULL::UUID;
+  END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$function$;
 
 -- 4.1.1 使用者主動離開，原子結束場次並釋放雙方狀態。
 CREATE OR REPLACE FUNCTION public.leave_match(p_match_id UUID)
@@ -607,27 +558,22 @@ DECLARE
     v_participants UUID[];
     v_now TIMESTAMPTZ := NOW();
 BEGIN
-    -- 1. 權限檢查：必須為管理員
     IF NOT public.is_admin() THEN
         RAISE EXCEPTION 'Only administrators can execute takeover.';
     END IF;
 
-    -- 2. 取得原房間參與者
-    SELECT participants INTO v_participants 
-    FROM public.matches 
+    SELECT participants INTO v_participants
+    FROM public.matches
     WHERE id = p_match_id AND is_active = TRUE;
 
     IF v_participants IS NULL OR NOT (p_target_user_id = ANY(v_participants)) THEN
         RAISE EXCEPTION 'Target user is not an active participant in this room.';
     END IF;
 
-    -- 3. 將陣列中的 target_user 替換為 admin_id
     v_participants := array_replace(v_participants, p_target_user_id, v_admin_id);
 
-    -- 4. 更新 matches 表紀錄 (設定 is_taken_over = TRUE)
-    UPDATE public.matches 
-    SET 
-        participants = v_participants,
+    UPDATE public.matches
+    SET participants = v_participants,
         is_taken_over = TRUE,
         is_takeover = TRUE,
         takeover_by = v_admin_id,
@@ -635,19 +581,16 @@ BEGIN
         takeover_at = v_now
     WHERE id = p_match_id;
 
-    -- 5. 將被接管的使用者狀態還原為 online
-    UPDATE public.profiles 
-    SET status = 'online' 
-    WHERE id = p_target_user_id;
+    UPDATE public.profiles SET status = 'online' WHERE id = p_target_user_id;
 
-    -- 6. 不寫入任何系統訊息；未被接管的一方必須無感繼續對話。
-    -- 7. 記錄至管理員接管稽核日誌表
+    -- Deliberately do not create a system message. The remaining user must
+    -- experience an uninterrupted conversation with the administrator.
     INSERT INTO public.admin_takeovers (match_id, admin_id, target_user_id, reason)
     VALUES (p_match_id, v_admin_id, p_target_user_id, p_reason);
 
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 -- 4.2 管理員緊急強制斷線預寫程序 (Emergency Kill Switch)
 CREATE OR REPLACE FUNCTION public.terminate_match_by_admin(
@@ -723,8 +666,95 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 REVOKE ALL ON FUNCTION public.purge_archived_messages() FROM PUBLIC, anon, authenticated;
 
 -- ========================================================
--- 5. 開啟 Realtime 即時推播 (Realtime Publication)
+-- 5. Minimal safe HTTP signaling and peer-profile access
 -- ========================================================
--- 必須將需要即時更新的表加入 publication，否則前端 channel 聽不到 postgres_changes
-ALTER PUBLICATION supabase_realtime ADD TABLE public.matches;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+CREATE SCHEMA IF NOT EXISTS chat_api_private;
+REVOKE ALL ON SCHEMA chat_api_private FROM PUBLIC, anon;
+GRANT USAGE ON SCHEMA chat_api_private TO authenticated;
+CREATE OR REPLACE FUNCTION chat_api_private.get_peer_profile(p_match_id uuid)
+RETURNS TABLE(gender varchar, age integer, city varchar, bio text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+  SELECT p.gender, p.age, p.city, p.bio
+  FROM public.matches m JOIN public.profiles p ON p.id = ANY(m.participants)
+  WHERE m.id = p_match_id AND auth.uid() IS NOT NULL
+    AND auth.uid() = ANY(m.participants) AND p.id <> auth.uid()
+    AND NOT public.is_banned()
+  LIMIT 1;
+$$;
+REVOKE ALL ON FUNCTION chat_api_private.get_peer_profile(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION chat_api_private.get_peer_profile(uuid) TO authenticated;
+CREATE OR REPLACE FUNCTION public.get_peer_profile(p_match_id uuid)
+RETURNS TABLE(gender varchar, age integer, city varchar, bio text)
+LANGUAGE sql STABLE SECURITY INVOKER SET search_path = ''
+AS $$ SELECT * FROM chat_api_private.get_peer_profile(p_match_id); $$;
+REVOKE ALL ON FUNCTION public.get_peer_profile(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_peer_profile(uuid) TO authenticated;
+NOTIFY pgrst, 'reload schema';
+
+-- Tunnel-only signaling. Does not modify other Supabase project tables.
+-- Only the two active members can exchange their SDP descriptions.
+CREATE TABLE IF NOT EXISTS public.tunnel_webrtc_signals (
+  match_id uuid NOT NULL REFERENCES public.matches(id) ON DELETE CASCADE,
+  sender_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  kind text NOT NULL CHECK (kind IN ('offer', 'answer')),
+  sdp jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (match_id, sender_id)
+);
+
+ALTER TABLE public.tunnel_webrtc_signals ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.tunnel_webrtc_signals FROM anon;
+GRANT SELECT, INSERT, UPDATE ON public.tunnel_webrtc_signals TO authenticated;
+
+DROP POLICY IF EXISTS "Tunnel participants read signals" ON public.tunnel_webrtc_signals;
+CREATE POLICY "Tunnel participants read signals"
+ON public.tunnel_webrtc_signals FOR SELECT TO authenticated
+USING (
+  NOT public.is_banned()
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = match_id AND m.is_active = TRUE
+      AND auth.uid() = ANY(m.participants)
+  )
+);
+
+DROP POLICY IF EXISTS "Tunnel participants create own signals" ON public.tunnel_webrtc_signals;
+CREATE POLICY "Tunnel participants create own signals"
+ON public.tunnel_webrtc_signals FOR INSERT TO authenticated
+WITH CHECK (
+  NOT public.is_banned()
+  AND sender_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = match_id AND m.is_active = TRUE
+      AND auth.uid() = ANY(m.participants)
+  )
+);
+
+DROP POLICY IF EXISTS "Tunnel participants replace own signals" ON public.tunnel_webrtc_signals;
+CREATE POLICY "Tunnel participants replace own signals"
+ON public.tunnel_webrtc_signals FOR UPDATE TO authenticated
+USING (
+  sender_id = auth.uid()
+  AND NOT public.is_banned()
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = match_id AND m.is_active = TRUE
+      AND auth.uid() = ANY(m.participants)
+  )
+)
+WITH CHECK (
+  sender_id = auth.uid()
+  AND NOT public.is_banned()
+  AND EXISTS (
+    SELECT 1 FROM public.matches m
+    WHERE m.id = match_id AND m.is_active = TRUE
+      AND auth.uid() = ANY(m.participants)
+  )
+);
+
+-- Prevent anonymous API access to private Tunnel data.
+REVOKE ALL ON public.profiles, public.matches, public.messages,
+ public.matching_pool, public.chat_reports, public.admin_takeovers,
+ public.topic_cards, public.topic_categories FROM anon;
