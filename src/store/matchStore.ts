@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 
 type MatchStatus = 'idle' | 'waiting' | 'matched' | 'chatting' | 'ended';
 type Intent = 'venting' | 'stimulation' | 'chill';
@@ -21,6 +21,27 @@ interface MatchState {
   reset: () => void;
   syncFromChannel: (state: Partial<MatchState>) => void;
 }
+
+const STORAGE_KEY = 'tunnel-match-storage';
+const legacyStorage = createJSONStorage<MatchState>(() => ({
+  getItem: (key: string) => {
+    const current = localStorage.getItem(key);
+    if (current !== null || key !== STORAGE_KEY) return current;
+    // One-time transparent migration. Otherwise an upgrade would discard an
+    // active matchId saved by previous versions while both peers are chatting.
+    const raw = localStorage.getItem('match-storage');
+    if (!raw) return null;
+    try {
+      const state = JSON.parse(raw)?.state;
+      if (!state || !['chill', 'venting', 'stimulation'].includes(state.intent) ||
+          !['nearest', 'farthest', 'unlimited'].includes(state.distanceMode)) return null;
+      localStorage.setItem(key, raw);
+      return raw;
+    } catch { return null; }
+  },
+  setItem: (key: string, value: string) => localStorage.setItem(key, value),
+  removeItem: (key: string) => localStorage.removeItem(key),
+}));
 
 const channel = typeof window !== 'undefined' && 'BroadcastChannel' in window
   ? new BroadcastChannel('tunnel_sync')
@@ -64,7 +85,8 @@ export const useMatchStore = create<MatchState>()(
   };
     },
     {
-      name: 'tunnel-match-storage',
+      name: STORAGE_KEY,
+      storage: legacyStorage,
       // A waiting room cannot survive reload: the in-memory matching parameters
       // and heartbeat are gone, so a persisted 'waiting' state would hang forever.
       // A live chatting matchId is still restored and validated by ChatWindow.

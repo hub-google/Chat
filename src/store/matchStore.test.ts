@@ -58,3 +58,18 @@ describe('match-store hydration', () => {
     useMatchStore.getState().reset();
   });
 });
+
+describe('legacy match session migration', () => {
+  it('restores a live room saved before storage keys were namespaced', async () => {
+    localStorage.clear();
+    localStorage.setItem('match-storage', JSON.stringify({
+      state: { status: 'chatting', matchId: 'previous-live-room', intent: 'chill', distanceMode: 'nearest' },
+      version: 0,
+    }));
+    await useMatchStore.persist.rehydrate();
+    expect(useMatchStore.getState().matchId).toBe('previous-live-room');
+    expect(useMatchStore.getState().status).toBe('chatting');
+    expect(localStorage.getItem('tunnel-match-storage')).not.toBeNull();
+    useMatchStore.getState().reset();
+  });
+});
