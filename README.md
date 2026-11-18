@@ -24,8 +24,10 @@ npm run lint
 npm run build
 ```
 
-`main`：開發測試分支，僅跑驗證工作流程。  
-`master`：正式網站 [chat.monsterport.com](https://chat.monsterport.com/)（Cloudflare Pages 靜態站）；既有 [GitHub Pages](https://hub-google.github.io/Chat/) 保留為舊入口，使用者會被導向正式網址。只在 `main` 驗證通過後更新。
+`main`：測試分支，自動部署到 [GitHub Pages](https://hub-google.github.io/Chat/)；不會導向 Cloudflare。  
+`release`：正式分支，只有更新此分支才觸發 [Cloudflare Pages](https://chat.monsterport.com/) 正式部署。  
+`master`：舊分支，已不再作為 Cloudflare 正式部署來源；不要再將變更部署到此分支。  
+這兩個網站都是 Next.js 靜態輸出，不使用 Cloudflare Workers。
 
 Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與 `NEXT_PUBLIC_SUPABASE_ANON_KEY` 設於環境變數。圖片功能需要 `NEXT_PUBLIC_IMGBB_API_KEY`，這是**公開前端金鑰**，請勿視為保密憑證，應注意服務配額與濫用風險。詳細設定參考 `.github/workflows/deploy.yml`。
 
@@ -83,10 +85,18 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 
 ## CHAT Cloudflare 靜態站與入口 WAF（2026-11-18）
 
-- 正式域名：`https://chat.monsterport.com`；DNS 是橘雲代理 CNAME `monsterport-chat.pages.dev`，Pages 專案 `monsterport-chat` 由 GitHub `hub-google/Chat` 的 `master` 建置（Next.js `output: export`，無 Cloudflare Workers、Pages Functions）。
+- 正式域名：`https://chat.monsterport.com`；DNS 是橘雲代理 CNAME `monsterport-chat.pages.dev`，Pages 專案 `monsterport-chat` 只由 GitHub `hub-google/Chat` 的 `release` 正式分支建置（Next.js `output: export`，無 Cloudflare Workers、Pages Functions）。
 - WAF：Cloudflare 區域 `monsterport.com` 的 `http_request_firewall_custom`，只有一條 `(http.host eq "chat.monsterport.com" and ip.src in $chat_blocked_ips)` 規則；Cloudflare 帳戶的免費 IP list `chat_blocked_ips` 最多 10,000 筆。其他子網域不受影響。
 - 私有同步：`scripts/tunnel_waf_sync.sql` 將 PostgreSQL `http` extension 安裝於 `private` schema；BAN／解 BAN 觸發 `private.tunnel_waf_sync()`，`tunnel-waf-expiry-sync` 每分鐘核對一次到期名單；使用 HTTPS 呼叫 Cloudflare List API。原始憑證只從 Supabase Vault 讀取，絕不交給瀏覽器。
 - **尚待憑證啟用：** 在 Cloudflare 建立僅對本帳戶授權 **Account / Account Filter Lists / Edit** 的 API Token，登入 `https://chat.monsterport.com/admin/moderation/`，在後台的「Cloudflare API Token」密碼欄貼上並按「設定並驗證金鑰」。只有成功呼叫 Cloudflare IP List API 的 Token 才會被保留在 Supabase Vault，使用 `tunnel_admin_configure_waf_token` 守護；**不要把 Token 提交 GitHub、貼入聊天或放入前端建置環境**。缺金鑰時資料庫 BAN 仍生效，但 WAF 不會跟著更新。
 - API Token 對應帳戶 ID `2374fd4a241005b20563b35af3bdc320`、清單 ID `debd9fd18dda49219c2b11cc56773c53`；只有 Cloudflare Account Filter Lists 的寫入權限是必要的，不需管理其他 WAF 規則或整個帳戶。
 - Cloudflare Pages 由獨立環境建置；圖片上傳使用的公開 ImgBB API key 如未設定到此 Pages 專案，該站圖片上傳會不可用。不要把此欄位誤當成私有 API Token。
 - 封鎖到期精度：Postgres RLS 即刻依到期時間放行；Cloudflare WAF 每分鐘更新，通常落後不到 1 分鐘，但網路失敗會造成更久延遲。管理後台顯示最後成功提交時間及錯誤。
+
+
+## 2026-11-18 部署規範（以此為準）
+
+- 只更新 `main`：GitHub Pages 測試站 `https://hub-google.github.io/Chat/`，不會變更 Cloudflare 正式站。
+- 只有合併至 `release` 才會更新 `https://chat.monsterport.com/`，Cloudflare 專案的 production branch 已調為 `release`，preview deployments 關閉。
+- GitHub Actions `.github/workflows/deploy.yml` 僅在 `main` push 觸發，並在部署後測試管理後台路由；`.github/workflows/verify.yml` 驗證 `main` 及要合併進 `release` 的 PR。
+- `main` 已移除從 GitHub Pages 強制跳轉 Cloudflare 的程式，測試站可以直接瀏覽。
