@@ -26,7 +26,7 @@ const names=process.platform==='darwin'
 const browser=names.find(n=>n.startsWith('/')?existsSync(n):spawnSync('which',[n],{stdio:'ignore'}).status===0);
 if(!browser)throw Error('No Chrome found on '+process.platform);
 const folder=mkdtempSync(join(tmpdir(),'tunnel-remote-p2p-'));
-let server,chrome,socket,stderr='',me,roomId;
+let server,chrome,socket,stderr='',me,roomId,evaluateBrowser;
 async function launch(){
   server=createServer((_q,r)=>{r.writeHead(200,{'content-type':'text/html'});r.end('<!doctype html><title>Cross-host WebRTC smoke</title>')});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -110,6 +110,7 @@ try {
   const initiator=match.participants[0]===me;
   console.log('MATCH_ID='+roomId+' ROLE='+(initiator?'offer':'answer'));
   const evaluate=await launch();
+  evaluateBrowser=evaluate;
   await evaluate(setup);
   if(initiator)await evaluate('smoke.makeOfferer()');
   const json=value=>JSON.stringify(value);
@@ -147,7 +148,40 @@ try {
     initiator,elapsedMs:initiator?Date.now()-begin:null,stats}));
 }catch(error){
   console.error('CROSS_HOST_FAIL: '+(error.stack||error));
-  if(stderr)console.error('Chrome diagnostic: '+stderr);
+  if(evaluateBrowser){
+    try{
+      const report=await evaluateBrowser([
+        "(() => {",
+        "  const count=(s,pattern)=>(s.match(new RegExp(pattern,'g'))||[]).length;",
+        "  const summary=sdp=>({host:count(sdp,'typ host'),srflx:count(sdp,'typ srflx'),relay:count(sdp,'typ relay')});",
+        "  return {connection:smoke.pc.connectionState,ice:smoke.pc.iceConnectionState,",
+        "    iceGathering:smoke.pc.iceGatheringState,",
+        "    local:summary(smoke.pc.localDescription?.sdp||''),",
+        "    remote:summary(smoke.pc.remoteDescription?.sdp||'')};",
+        "})()"
+      ].join('\\n'));
+      console.log('ICE_DIAGNOSTIC '+JSON.stringify(report));
+    }catch(failure){console.error('ICE diagnostics unavailable:',failure.message)}
+  }
+  if(me&&roomId){
+    try{
+      // Verify production HTTP fallback using actual remote participants.
+      const prefix='TUNNEL-CROSSHOST-HTTP-'+runId+'-';
+      const content=prefix+process.platform;
+      ok(await supabase.from('messages').insert({
+        id:crypto.randomUUID(),match_id:roomId,sender_id:me,content,type:'text'
+      }),'Write HTTP fallback');
+      const records=await until(async()=>{
+        const result=ok(await supabase.from('messages').select('sender_id,content')
+          .eq('match_id',roomId).like('content',prefix+'%'),'Read HTTP fallback');
+        return new Set((result||[]).map(msg=>msg.sender_id)).size>=2?result:null;
+      },30000,'Remote HTTP fallback',750);
+      console.log('HTTP_FALLBACK_PASS '+JSON.stringify({remoteSenders:new Set(records.map(msg=>msg.sender_id)).size}));
+    }catch(failure){
+      console.error('HTTP_FALLBACK_FAIL: '+(failure.stack||failure));
+    }
+  }
+  if(stderr)console.error('Chrome diagnostic tail: '+stderr.slice(-450));
   process.exitCode=1;
 }finally{
   if(me){
@@ -156,7 +190,12 @@ try {
   }
   try{socket?.close()}catch{}
   try{chrome?.kill('SIGTERM')}catch{}
+  if(chrome)await Promise.race([
+    new Promise(resolve=>chrome.once('exit',resolve)),
+    sleep(1800)
+  ]);
   if(server)await new Promise(resolve=>server.close(resolve));
-  rmSync(folder,{recursive:true,force:true});
+  try{rmSync(folder,{recursive:true,force:true,maxRetries:3,retryDelay:200})}
+  catch(failure){console.warn('Temporary Chrome profile cleanup warning:',failure.message)}
   console.log('TEST_AUTH_CLEANUP_ID='+me+' TEST_RUN='+runId);
 }
