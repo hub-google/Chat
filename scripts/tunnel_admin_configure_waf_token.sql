@@ -18,6 +18,8 @@ BEGIN
     PERFORM vault.update_secret(v_secret,new_secret=>v_token);
   END IF;
 
+  -- Force Cloudflare API validation even when the existing ban list is unchanged.
+  UPDATE private.tunnel_waf_sync_state SET last_payload_md5=NULL WHERE singleton;
   v_ok := private.tunnel_waf_sync();
   IF v_ok IS DISTINCT FROM TRUE THEN
     RAISE EXCEPTION 'Cloudflare rejected this API Token or list update. Requires Account Filter Lists Edit for this account.';
