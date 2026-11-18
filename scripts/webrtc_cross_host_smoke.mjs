@@ -30,7 +30,7 @@ let server,chrome,socket,stderr='',me,roomId,evaluateBrowser;
 async function launch(){
   server=createServer((_q,r)=>{r.writeHead(200,{'content-type':'text/html'});r.end('<!doctype html><title>Cross-host WebRTC smoke</title>')});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const flags=['--headless=new','--no-first-run','--no-default-browser-check','--remote-debugging-port=0','--user-data-dir='+folder];
+  const flags=['--headless=new','--no-first-run','--disable-background-networking','--disable-component-update','--no-default-browser-check','--remote-debugging-port=0','--user-data-dir='+folder];
   if(process.platform==='linux')flags.push('--no-sandbox','--disable-dev-shm-usage','--disable-gpu');
   flags.push('http://127.0.0.1:'+server.address().port);
   chrome=spawn(browser,flags,{stdio:['ignore','ignore','pipe']});
@@ -109,6 +109,20 @@ try {
   const match=ok(await supabase.from('matches').select('participants').eq('id',roomId).single(),'Read pair');
   const initiator=match.participants[0]===me;
   console.log('MATCH_ID='+roomId+' ROLE='+(initiator?'offer':'answer'));
+  // Synchronize both independent runner jobs by exercising the real HTTP
+  // fallback before trying to negotiate WebRTC. This tests the fallback
+  // regardless of whether the STUN path happens to work on this run.
+  const prefix='TUNNEL-CROSSHOST-HTTP-'+runId+'-';
+  ok(await supabase.from('messages').insert({
+    id:crypto.randomUUID(),match_id:roomId,sender_id:me,
+    content:prefix+process.platform,type:'text'
+  }),'Write HTTP fallback');
+  const visible=await until(async()=>{
+    const result=ok(await supabase.from('messages').select('sender_id,content')
+      .eq('match_id',roomId).like('content',prefix+'%'),'Read peer HTTP fallback');
+    return new Set((result||[]).map(row=>row.sender_id)).size===2?result:null;
+  },70000,'Both sides received HTTP fallback',650);
+  console.log('HTTP_FALLBACK_PASS '+JSON.stringify({senders:new Set(visible.map(row=>row.sender_id)).size}));
   const evaluate=await launch();
   evaluateBrowser=evaluate;
   await evaluate(setup);
@@ -162,24 +176,6 @@ try {
       ].join('\n'));
       console.log('ICE_DIAGNOSTIC '+JSON.stringify(report));
     }catch(failure){console.error('ICE diagnostics unavailable:',failure.message)}
-  }
-  if(me&&roomId){
-    try{
-      // Verify production HTTP fallback using actual remote participants.
-      const prefix='TUNNEL-CROSSHOST-HTTP-'+runId+'-';
-      const content=prefix+process.platform;
-      ok(await supabase.from('messages').insert({
-        id:crypto.randomUUID(),match_id:roomId,sender_id:me,content,type:'text'
-      }),'Write HTTP fallback');
-      const records=await until(async()=>{
-        const result=ok(await supabase.from('messages').select('sender_id,content')
-          .eq('match_id',roomId).like('content',prefix+'%'),'Read HTTP fallback');
-        return new Set((result||[]).map(msg=>msg.sender_id)).size>=2?result:null;
-      },30000,'Remote HTTP fallback',750);
-      console.log('HTTP_FALLBACK_PASS '+JSON.stringify({remoteSenders:new Set(records.map(msg=>msg.sender_id)).size}));
-    }catch(failure){
-      console.error('HTTP_FALLBACK_FAIL: '+(failure.stack||failure));
-    }
   }
   if(stderr)console.error('Chrome diagnostic tail: '+stderr.slice(-450));
   process.exitCode=1;
