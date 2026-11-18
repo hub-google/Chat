@@ -91,6 +91,7 @@ try {
   const localPort = server.address().port;
   chrome = spawn(browserPath, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+    '--disable-background-networking', '--disable-extensions', '--disable-component-update',
     '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
     '--user-data-dir=' + dir, 'http://127.0.0.1:' + localPort,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -106,7 +107,7 @@ try {
   const started = Date.now();
   while (!fs.existsSync(portFile)) {
     if (chromeStopped) throw new Error(chromeFailure + ': ' + chromeStderr);
-    if (Date.now() - started > 24000) {
+    if (Date.now() - started > 60000) {
       throw new Error('Chrome DevTools startup timeout: ' + chromeStderr);
     }
     await sleep(100);
