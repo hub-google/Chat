@@ -14,6 +14,7 @@ type Source = {
   message_count: number; sender_count: number; last_seen: string;
 };
 type BanRow = { ip: string; expires_at: string; reason: string; created_at: string; is_active: boolean };
+type WafStatus = { configured: boolean; active_bans: number; last_attempt_at: string | null; last_accepted_at: string | null; last_http_status: number | null; last_error: string | null };
 
 const durations: { value: BanDuration; label: string }[] = [
   { value: '5m', label: '5 分鐘' }, { value: '30m', label: '30 分鐘' },
@@ -31,6 +32,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
   const [phrases, setPhrases] = useState<Phrase[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [bans, setBans] = useState<BanRow[]>([]);
+  const [waf, setWaf] = useState<WafStatus | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [manualIp, setManualIp] = useState('');
   const [busy, setBusy] = useState(false);
@@ -42,12 +44,13 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError('');
-    const [ranked, active] = await Promise.all([
+    const [ranked, active, sync] = await Promise.all([
       supabase.rpc('tunnel_admin_phrase_ranking', { p_hours: hours }),
       supabase.rpc('tunnel_admin_list_ip_bans'),
+      supabase.rpc('tunnel_admin_waf_status'),
     ]);
-    if (ranked.error || active.error) setError(ranked.error?.message ?? active.error?.message ?? '查詢失敗');
-    else { setPhrases((ranked.data ?? []) as Phrase[]); setBans((active.data ?? []) as BanRow[]); }
+    if (ranked.error || active.error || sync.error) setError(ranked.error?.message ?? active.error?.message ?? sync.error?.message ?? '查詢失敗');
+    else { setPhrases((ranked.data ?? []) as Phrase[]); setBans((active.data ?? []) as BanRow[]); setWaf((sync.data?.[0] ?? null) as WafStatus | null); }
     setLoading(false);
   }, [hours]);
 
@@ -58,12 +61,14 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     void Promise.all([
       supabase.rpc('tunnel_admin_phrase_ranking', { p_hours: hours }),
       supabase.rpc('tunnel_admin_list_ip_bans'),
-    ]).then(([ranked, currentBans]) => {
+      supabase.rpc('tunnel_admin_waf_status'),
+    ]).then(([ranked, currentBans, sync]) => {
       if (!active) return;
-      if (ranked.error || currentBans.error) setError(ranked.error?.message ?? currentBans.error?.message ?? '查詢失敗');
+      if (ranked.error || currentBans.error || sync.error) setError(ranked.error?.message ?? currentBans.error?.message ?? sync.error?.message ?? '查詢失敗');
       else {
         setPhrases((ranked.data ?? []) as Phrase[]);
         setBans((currentBans.data ?? []) as BanRow[]);
+        setWaf((sync.data?.[0] ?? null) as WafStatus | null);
       }
       setLoading(false);
     });
@@ -88,7 +93,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     setBusy(true); setError(''); setNotice('');
     const { data, error: resultError } = await supabase.rpc('tunnel_admin_ban_phrase', { p_hours: hours, p_phrase: phrase.phrase, p_duration: duration });
     if (resultError) setError(resultError.message);
-    else setNotice(`已封鎖 ${data ?? 0} 個 IP，期限 ${durations.find(x => x.value === duration)?.label}；目前生效於 CHAT 資料庫操作，不代表已啟用 Cloudflare 網站入口封鎖。`);
+    else setNotice(`已建立 ${data ?? 0} 筆 IP 封鎖。資料庫即時生效；Cloudflare 同步狀態請看上方提示。`);
     await refresh();
     setBusy(false);
   }
@@ -99,7 +104,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     setBusy(true); setError(''); setNotice('');
     const { data, error: resultError } = await supabase.rpc('tunnel_admin_ban_ip', { p_ip: ip, p_duration: duration, p_reason: '管理員手動封鎖' });
     if (resultError) setError(resultError.message);
-    else { setNotice(`已封鎖 ${ip}，至 ${time(String(data))}（資料庫存取層）。`); setManualIp(''); }
+    else { setNotice(`已封鎖 ${ip}，至 ${time(String(data))}；Cloudflare 同步狀態請看上方提示。`); setManualIp(''); }
     await refresh(); setBusy(false);
   }
 
@@ -112,10 +117,29 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     await refresh(); setBusy(false);
   }
 
+  async function retryWafSync() {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const { data, error: resultError } = await supabase.rpc('tunnel_admin_waf_resync');
+    if (resultError) setError(resultError.message);
+    else if (data === true) setNotice('Cloudflare 已接受 IP 清單更新，請查看同步狀態。');
+    else setNotice('Cloudflare 尚未接受同步，請查看上方授權或錯誤提示。');
+    await refresh();
+    setBusy(false);
+  }
+
   return <div className={styles.root}>
     <section className={styles.noticeBox}>
       <AlertTriangle size={19} />
-      <div><strong>目前為資料庫層的 IP 封鎖</strong><p>封鎖可防止 IP 使用配對與訊息 API，既有 WebRTC 連線也會檢查封鎖狀態。由於 CHAT 的 GitHub Pages 網址尚未經 Cloudflare 代理，無法阻止對方載入網站靜態首頁。IP 地區為推估、裝置資訊由瀏覽器提供。</p></div>
+      <div>
+        <strong>{waf?.configured && !waf.last_error ? 'Cloudflare WAF IP 清單已接受最近一次同步' : 'Cloudflare WAF 自動同步尚未就緒'}</strong>
+        <p>正式網址 <a href="https://chat.monsterport.com/" target="_blank" rel="noreferrer">chat.monsterport.com</a> 已有專用 Cloudflare WAF 規則；資料庫封鎖即時生效。只有 Cloudflare 成功同步後，才能在網站入口拒絕 IP。</p>
+        <p>API Token：{waf?.configured ? '已設定' : '未設定'}；有效封鎖 {waf?.active_bans ?? '—'} 筆；最近成功提交：{waf?.last_accepted_at ? time(waf.last_accepted_at) : '尚無'}。</p>
+        {waf?.last_error && <p role="status">同步提示：{waf.last_error}</p>}
+        <p>封鎖到期後由 Supabase 每分鐘同步解除。原 GitHub Pages 與 pages.dev 網址仍可能直接載入靜態檔案，但 CHAT 功能會檢查後端封鎖。</p>
+        <button type="button" className={styles.subtle} disabled={busy} onClick={() => void retryWafSync()}><RefreshCw size={14}/>重新同步 Cloudflare</button>
+      </div>
     </section>
     <section className={styles.panel}>
       <div className={styles.head}><div><h2>最常出現的聊天文字</h2><p>相同文字（忽略首尾空白與連續空格）合併計算，只分析文字訊息，最多列出 100 項。</p></div>

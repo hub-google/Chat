@@ -25,7 +25,7 @@ npm run build
 ```
 
 `main`：開發測試分支，僅跑驗證工作流程。  
-`master`：正式網站 [GitHub Pages](https://hub-google.github.io/Chat/)，在 `main` 驗證後才更新。
+`master`：正式網站 [chat.monsterport.com](https://chat.monsterport.com/)（Cloudflare Pages 靜態站）；既有 [GitHub Pages](https://hub-google.github.io/Chat/) 保留為舊入口，使用者會被導向正式網址。只在 `main` 驗證通過後更新。
 
 Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與 `NEXT_PUBLIC_SUPABASE_ANON_KEY` 設於環境變數。圖片功能需要 `NEXT_PUBLIC_IMGBB_API_KEY`，這是**公開前端金鑰**，請勿視為保密憑證，應注意服務配額與濫用風險。詳細設定參考 `.github/workflows/deploy.yml`。
 
@@ -67,9 +67,9 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - 封鎖：單一 IP 或該句話所有已知來源 IP。可選 5 分鐘、30 分鐘、1／6／24 小時、7／30 天、1 年、10 年。管理員自己的目前來源 IP 不會被批次封鎖。封鎖延長或提早解除皆在私有資料表留下紀錄。
 - 資料庫部署：執行 `scripts/tunnel_phrase_ip_moderation.sql`（已套用到現有 Supabase 專案，請勿重複套用於其他共用專案）。只有受權限保護的 RPC 可以查詢與修改 IP 黑名單。
 - 每則新訊息由 PostgreSQL trigger 記錄 PostgREST 轉送的來源 IP 快照；早期訊息因沒有快照，僅能使用個人資料中最近一次 IP 推估。IP 地點可能不精準到區，裝置／瀏覽器可被用戶端偽造，勿作為唯一處罰證據。
-- 期限由資料庫 `expires_at > now()` 判定，自動失效，不用 Workers、Cron 或額外輪詢。被封鎖者的配對、訊息寫入和訊號交換受 RLS／RPC 阻擋；首頁有拒絕畫面，聊天中每 5 秒檢查權限並關閉 P2P 通道。
+- 資料庫封鎖由 `expires_at > now()` 即時判定，到期自動失效；Cloudflare 網站入口封鎖另使用每分鐘一筆 Supabase pg_cron 同步，沒有 Cloudflare Workers。被封鎖者的配對、訊息寫入和訊號交換受 RLS／RPC 阻擋；首頁有拒絕畫面，聊天中每 5 秒檢查權限並關閉 P2P 通道。
 
-**網站入口限制：** 目前正式網站為 GitHub Pages，並非 Cloudflare 代理的 CHAT 網域，因此 SQL 封鎖**不能**在 HTTP 入口拒絕訪客取得靜態 HTML，也無法封鎖訪客直接存取 `github.io`。要達成真正的網路層封鎖，必須先將正式 CHAT 網址連至 Cloudflare 代理，再透過安全後端將封鎖清單同步到限定 CHAT 網域的 WAF 自訂規則；絕不可把 Cloudflare API token 放在前端。此部分**尚未啟用**，後台會明示目前是資料庫封鎖。
+**網站入口限制：** 已在 Cloudflare 上建立 `chat.monsterport.com` 及專屬 WAF 規則，規則只影響 CHAT 網域。同步清單的 Postgres 函式與 1 分鐘 pg_cron 已設定，但**Cloudflare API Token 未提供前 WAF IP 清單不會隨後台變更更新**，後台會顯示同步狀態。GitHub Pages 與 Pages 原始 `*.pages.dev` 靜態 HTML 仍可取得；已加入客戶端導向正式網域，且 Supabase 後端持續阻止遭封鎖 IP 操作。不能以此宣稱原始靜態資產完全不可繞過。
 
 ## HTTP 控制流量優化與驗證
 
@@ -78,3 +78,15 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - 新環境的 `supabase_init.sql` 已包含 IP／常見文字管理與聊天室控制 RPC；既有環境透過個別 migration 更新。
 - 資料庫已完成 20 組配對、訊號交換、第三人拒絕讀取、P2P 失敗後的 HTTP 訊息備援、離開後補傳等回滾式驗證；尚未視為跨網路雙裝置壓測。
 - 取消配對改由 `tunnel_cancel_matching` RPC 在同一交易中鎖定等待者、取消排隊及結束剛好同時成立的房間，避免產生孤立的聊天室。
+
+
+
+## CHAT Cloudflare 靜態站與入口 WAF（2026-11-18）
+
+- 正式域名：`https://chat.monsterport.com`；DNS 是橘雲代理 CNAME `monsterport-chat.pages.dev`，Pages 專案 `monsterport-chat` 由 GitHub `hub-google/Chat` 的 `master` 建置（Next.js `output: export`，無 Cloudflare Workers、Pages Functions）。
+- WAF：Cloudflare 區域 `monsterport.com` 的 `http_request_firewall_custom`，只有一條 `(http.host eq "chat.monsterport.com" and ip.src in $chat_blocked_ips)` 規則；Cloudflare 帳戶的免費 IP list `chat_blocked_ips` 最多 10,000 筆。其他子網域不受影響。
+- 私有同步：`scripts/tunnel_waf_sync.sql` 將 PostgreSQL `http` extension 安裝於 `private` schema；BAN／解 BAN 觸發 `private.tunnel_waf_sync()`，`tunnel-waf-expiry-sync` 每分鐘核對一次到期名單；使用 HTTPS 呼叫 Cloudflare List API。原始憑證只從 Supabase Vault 讀取，絕不交給瀏覽器。
+- **尚待憑證啟用：** 在 Cloudflare 建立僅對本帳戶授權 **Account / Account Filter Lists / Edit** 的 API Token，直接在 Supabase SQL Editor 以 `SELECT vault.create_secret('TOKEN_GOES_HERE','chat_cf_waf_api_token','CHAT-only Cloudflare WAF IP list sync');` 存入 Vault。**不要把 Token 提交 GitHub、貼入聊天或放入前端。** 存入後呼叫管理後台「重新同步 Cloudflare」或等候 1 分鐘，並檢查 WAF 狀態。缺金鑰時資料庫 BAN 仍生效，但 WAF 不會跟著更新。
+- API Token 對應帳戶 ID `2374fd4a241005b20563b35af3bdc320`、清單 ID `debd9fd18dda49219c2b11cc56773c53`；只有 Cloudflare Account Filter Lists 的寫入權限是必要的，不需管理其他 WAF 規則或整個帳戶。
+- Cloudflare Pages 由獨立環境建置；圖片上傳使用的公開 ImgBB API key 如未設定到此 Pages 專案，該站圖片上傳會不可用。不要把此欄位誤當成私有 API Token。
+- 封鎖到期精度：Postgres RLS 即刻依到期時間放行；Cloudflare WAF 每分鐘更新，通常落後不到 1 分鐘，但網路失敗會造成更久延遲。管理後台顯示最後成功提交時間及錯誤。
