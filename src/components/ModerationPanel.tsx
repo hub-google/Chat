@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { AlertTriangle, Ban, ChevronDown, ChevronRight, RefreshCw, ShieldOff, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import styles from './ModerationPanel.module.css';
@@ -33,6 +33,8 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [bans, setBans] = useState<BanRow[]>([]);
   const [waf, setWaf] = useState<WafStatus | null>(null);
+  const [wafToken, setWafToken] = useState('');
+  const [editWafToken, setEditWafToken] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [manualIp, setManualIp] = useState('');
   const [busy, setBusy] = useState(false);
@@ -117,6 +119,26 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     await refresh(); setBusy(false);
   }
 
+  async function configureWafToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || !wafToken.trim()) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    const { data, error: tokenError } = await supabase.rpc('tunnel_admin_configure_waf_token', {
+      p_token: wafToken.trim(),
+    });
+    if (tokenError || data !== true) {
+      setError(tokenError?.message ?? 'Cloudflare 沒有接受這組 API Token，請檢查權限。');
+    } else {
+      setWafToken('');
+      setEditWafToken(false);
+      setNotice('Cloudflare API Token 已安全存入 Supabase Vault，並成功送出黑名單同步。');
+    }
+    await refresh();
+    setBusy(false);
+  }
+
   async function retryWafSync() {
     if (busy) return;
     setBusy(true);
@@ -138,7 +160,28 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
         <p>API Token：{waf?.configured ? '已設定' : '未設定'}；有效封鎖 {waf?.active_bans ?? '—'} 筆；最近成功提交：{waf?.last_accepted_at ? time(waf.last_accepted_at) : '尚無'}。</p>
         {waf?.last_error && <p role="status">同步提示：{waf.last_error}</p>}
         <p>封鎖到期後由 Supabase 每分鐘同步解除。原 GitHub Pages 與 pages.dev 網址仍可能直接載入靜態檔案，但 CHAT 功能會檢查後端封鎖。</p>
+        {(!waf?.configured || editWafToken) && (
+          <form className={styles.manual} onSubmit={(event) => void configureWafToken(event)}>
+            <input
+              aria-label="Cloudflare API Token"
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              value={wafToken}
+              onChange={(event) => setWafToken(event.target.value)}
+              placeholder="貼上 Account Filter Lists Edit 權限的 API Token"
+              required
+            />
+            <button type="submit" className={styles.danger} disabled={busy || wafToken.trim().length < 20}>
+              設定並驗證金鑰
+            </button>
+          </form>
+        )}
+        <p>首次啟用：到 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer">Cloudflare API Tokens</a> 建立一組僅限本帳戶「Account Filter Lists: Edit」的 Token，再直接貼到此管理頁。金鑰只寫入 Supabase Vault，不會出現在公開網頁原始碼或 GitHub。</p>
         <button type="button" className={styles.subtle} disabled={busy} onClick={() => void retryWafSync()}><RefreshCw size={14}/>重新同步 Cloudflare</button>
+        {waf?.configured && (
+          <button type="button" className={styles.subtle} disabled={busy} onClick={() => setEditWafToken((value) => !value)}>{editWafToken ? '取消更換金鑰' : '更換 API Token'}</button>
+        )}
       </div>
     </section>
     <section className={styles.panel}>
