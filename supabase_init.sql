@@ -322,35 +322,35 @@ USING ((SELECT auth.uid()) = id OR (SELECT public.is_admin()));
 
 CREATE POLICY "Users can update own profile"
 ON public.profiles FOR UPDATE TO authenticated
-USING ((auth.uid() = id AND NOT public.is_banned()) OR public.is_admin())
-WITH CHECK ((auth.uid() = id AND role = 'user') OR public.is_admin());
+USING (((SELECT auth.uid()) = id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()))
+WITH CHECK (((SELECT auth.uid()) = id AND role = 'user') OR (SELECT public.is_admin()));
 
 CREATE POLICY "Users can insert own profile"
 ON public.profiles FOR INSERT TO authenticated
-WITH CHECK (auth.uid() = id AND role = 'user');
+WITH CHECK ((SELECT auth.uid()) = id AND role = 'user');
 
 CREATE POLICY "Users manage own queue row"
 ON public.matching_pool FOR ALL TO authenticated
-USING ((auth.uid() = user_id AND NOT public.is_banned()) OR public.is_admin())
-WITH CHECK ((auth.uid() = user_id AND NOT public.is_banned()) OR public.is_admin());
+USING (((SELECT auth.uid()) = user_id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()))
+WITH CHECK (((SELECT auth.uid()) = user_id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()));
 
 CREATE POLICY "Participants or admins can view matches"
 ON public.matches FOR SELECT TO authenticated
-USING (((auth.uid() = ANY(participants) OR auth.uid() = takeover_target) AND NOT public.is_banned()) OR public.is_admin());
+USING ((((SELECT auth.uid()) = ANY(participants) OR (SELECT auth.uid()) = takeover_target) AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()));
 
 CREATE POLICY "Messages read policy with takeover isolation"
 ON public.messages FOR SELECT TO authenticated
 USING (
-    NOT public.is_banned() AND (
-        public.is_admin()
+    NOT (SELECT public.is_banned()) AND (
+        (SELECT public.is_admin())
         OR EXISTS (
             SELECT 1 FROM public.matches
-            WHERE id = messages.match_id AND auth.uid() = ANY(participants)
+            WHERE id = messages.match_id AND (SELECT auth.uid()) = ANY(participants)
         )
         OR EXISTS (
             SELECT 1 FROM public.matches
             WHERE id = messages.match_id
-              AND takeover_target = auth.uid()
+              AND takeover_target = (SELECT auth.uid())
               AND messages.created_at <= takeover_at
         )
     )
@@ -383,31 +383,31 @@ WITH CHECK (
 
 CREATE POLICY "Users can create chat_reports"
 ON public.chat_reports FOR INSERT TO authenticated
-WITH CHECK (auth.uid() = reporter_id AND NOT public.is_banned());
+WITH CHECK ((SELECT auth.uid()) = reporter_id AND NOT (SELECT public.is_banned()));
 
 CREATE POLICY "Admins can review chat_reports"
 ON public.chat_reports FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Everyone can read active topic categories"
 ON public.topic_categories FOR SELECT TO authenticated
-USING (is_active = TRUE OR public.is_admin());
+USING (is_active = TRUE OR (SELECT public.is_admin()));
 
 CREATE POLICY "Everyone can read active topic cards"
 ON public.topic_cards FOR SELECT TO authenticated
-USING (is_active = TRUE OR public.is_admin());
+USING (is_active = TRUE OR (SELECT public.is_admin()));
 
 CREATE POLICY "Admins can manage topic categories"
 ON public.topic_categories FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Admins can manage topic cards"
 ON public.topic_cards FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Admins can access takeover logs"
 ON public.admin_takeovers FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 -- ========================================================
 -- 4. 自動化函數與預寫程序 (STORED PROCEDURES & TRIGGERS)
@@ -708,11 +708,11 @@ DROP POLICY IF EXISTS "Tunnel participants read signals" ON public.tunnel_webrtc
 CREATE POLICY "Tunnel participants read signals"
 ON public.tunnel_webrtc_signals FOR SELECT TO authenticated
 USING (
-  NOT public.is_banned()
+  NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
@@ -720,12 +720,12 @@ DROP POLICY IF EXISTS "Tunnel participants create own signals" ON public.tunnel_
 CREATE POLICY "Tunnel participants create own signals"
 ON public.tunnel_webrtc_signals FOR INSERT TO authenticated
 WITH CHECK (
-  NOT public.is_banned()
-  AND sender_id = auth.uid()
+  NOT (SELECT public.is_banned())
+  AND sender_id = (SELECT auth.uid())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
@@ -733,21 +733,21 @@ DROP POLICY IF EXISTS "Tunnel participants replace own signals" ON public.tunnel
 CREATE POLICY "Tunnel participants replace own signals"
 ON public.tunnel_webrtc_signals FOR UPDATE TO authenticated
 USING (
-  sender_id = auth.uid()
-  AND NOT public.is_banned()
+  sender_id = (SELECT auth.uid())
+  AND NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 )
 WITH CHECK (
-  sender_id = auth.uid()
-  AND NOT public.is_banned()
+  sender_id = (SELECT auth.uid())
+  AND NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
