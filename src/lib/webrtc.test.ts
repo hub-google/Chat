@@ -127,6 +127,27 @@ describe('HTTP WebRTC handshake', () => {
     } finally { manager.close(); }
   });
 
+  it('closes an abusive P2P channel before a peer can flood the chat UI', async () => {
+    vi.mocked(getUserId).mockResolvedValueOnce('user-a').mockResolvedValueOnce('user-b');
+    const received = vi.fn();
+    const onState = vi.fn();
+    const a = new WebRTCManager(received, onState);
+    const b = new WebRTCManager(vi.fn());
+    try {
+      await Promise.all([a.initConnection('match-flood', true), b.initConnection('match-flood', false)]);
+      const channel = FakePeerConnection.instances[0].channel!;
+      for (let i = 0; i < 31; i++) {
+        const id = 'd5b0a6ed-b631-45a3-b990-' + i.toString(16).padStart(12, '0');
+        channel.onmessage?.({ data: JSON.stringify({ type: 'chat', message: { id, text: 'flood', timestamp: 1 } }) } as MessageEvent);
+      }
+      expect(received).toHaveBeenCalledTimes(30);
+      expect(onState).toHaveBeenLastCalledWith('closed');
+      expect(channel.readyState).toBe('closed');
+      channel.onmessage?.({ data: JSON.stringify({ type: 'typing', isTyping: true }) } as MessageEvent);
+      expect(received).toHaveBeenCalledTimes(30);
+    } finally { a.close(); b.close(); }
+  });
+
   it('switches to HTTP fallback when ICE disconnects and returns to P2P after recovery', async () => {
     vi.mocked(getUserId).mockResolvedValueOnce('user-a').mockResolvedValueOnce('user-b');
     const state = vi.fn();

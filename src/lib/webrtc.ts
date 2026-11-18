@@ -17,6 +17,8 @@ export class WebRTCManager {
   private negotiationId: string | null = null;
   private handshakeTimeout: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
+  private recentPeerFrames: number[] = [];
+  private recentPeerChats: number[] = [];
   private onMessage: (message: PeerEvent) => void;
   private onConnectionState: (state: ConnectionState) => void;
 
@@ -29,6 +31,8 @@ export class WebRTCManager {
     this.matchId = matchId;
     this.closing = false;
     this.negotiationId = null;
+    this.recentPeerFrames = [];
+    this.recentPeerChats = [];
     const userId = await getUserId();
     if (this.closing) return;
     this.userId = userId;
@@ -187,11 +191,33 @@ export class WebRTCManager {
       this.onConnectionState('open');
     };
     this.dataChannel.onmessage = (event) => {
+      if (this.closing) return;
+      // Keep a hostile peer from exhausting browser memory/CPU via direct
+      // DataChannel frames. Database moderation remains a separate control.
+      const now = Date.now();
+      const cutoff = now - 10_000;
+      while (this.recentPeerFrames.length && this.recentPeerFrames[0] <= cutoff) this.recentPeerFrames.shift();
+      this.recentPeerFrames.push(now);
+      if (this.recentPeerFrames.length > 200) {
+        this.close();
+        this.onConnectionState('closed');
+        return;
+      }
       if (typeof event.data !== 'string' || event.data.length > 25000) return;
       try {
         const parsed = parsePeerEvent(JSON.parse(event.data));
+        if (parsed?.type === 'chat') {
+          while (this.recentPeerChats.length && this.recentPeerChats[0] <= cutoff) this.recentPeerChats.shift();
+          if (this.recentPeerChats.length >= 30) {
+            this.close();
+            this.onConnectionState('closed');
+            return;
+          }
+          this.recentPeerChats.push(now);
+        }
         if (parsed) this.onMessage(parsed);
       } catch {
+        // Invalid payloads count toward the frame limit as well.
         console.warn('Dropped malformed P2P message');
       }
     };
