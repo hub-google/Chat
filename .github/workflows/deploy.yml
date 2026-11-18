@@ -63,3 +63,11 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify GitHub Pages main test site
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-delay 3 --max-time 30 \
+            --output /tmp/chat-main-admin.html 'https://hub-google.github.io/Chat/admin/moderation/'
+          test -s /tmp/chat-main-admin.html
+          grep -q '<html' /tmp/chat-main-admin.html
+          ! grep -q 'chat-canonical-host' /tmp/chat-main-admin.html
