@@ -9,7 +9,7 @@ import { TopicCards } from './TopicCards';
 import { Send, Image as ImageIcon, LogOut, CheckCircle2, CheckCheck, Sparkles, AlertTriangle } from 'lucide-react';
 import type { StoredChatMessage } from '../lib/idb';
 import { OUTBOX_UPDATED, stageMessage, uploadStagedMessage, type OutboxResult } from '../lib/messageOutbox';
-import { env } from '../lib/env';
+import { uploadImageBlob } from '../lib/imageUpload';
 import { getUserId } from '../lib/user';
 import Image from 'next/image';
 import { useActionDialog } from './useActionDialog';
@@ -565,35 +565,15 @@ export function ChatWindow() {
         img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Image load error')); };
       });
 
-      const formData = new FormData();
-      formData.append('image', compressedBlob, file.name);
-
-      const apiKey = env.IMGBB_API_KEY;
-      if (!apiKey) throw new Error('圖片空間金鑰尚未在建置環境中設定');
-      const uploadUrl = `${env.IMGBB_UPLOAD_URL || 'https://api.imgbb.com/1/upload'}?key=${encodeURIComponent(apiKey)}`;
-      
-      const res = await fetch(uploadUrl, { method: 'POST', body: formData });
-      const responseText = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        throw new Error(`圖片服務回傳非 JSON 內容（HTTP ${res.status}），請檢查部署環境與上傳網址`);
-      }
-      
-      if (!res.ok || !data.success) throw new Error(data?.error?.message || `圖片服務回傳 ${res.status}`);
-      if (data.success) {
-        const url = new URL(data?.data?.url);
-        if (url.protocol !== 'https:') throw new Error('圖片服務回傳不安全的連結');
-        const delivered = await sendLocalMessage({
-          id: crypto.randomUUID(),
-          sender: 'me',
-          imageUrl: url.href,
-          timestamp: Date.now(),
-          status: 'sent',
-        });
-        if (!delivered) setNotice('圖片上傳完成，但訊息尚未傳送');
-      }
+      const imageUrl = await uploadImageBlob(compressedBlob, file.name);
+      const delivered = await sendLocalMessage({
+        id: crypto.randomUUID(),
+        sender: 'me',
+        imageUrl,
+        timestamp: Date.now(),
+        status: 'sent',
+      });
+      if (!delivered) setNotice('圖片上傳完成，但訊息尚未傳送');
     } catch (error) {
       console.error('Image upload failed', error);
       setNotice(error instanceof Error ? `圖片上傳失敗：${error.message}` : '圖片上傳失敗。');
