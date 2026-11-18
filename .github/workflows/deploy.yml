@@ -46,7 +46,7 @@ jobs:
           NEXT_PUBLIC_BASE_PATH: '/Chat'
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-          IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
+          NEXT_PUBLIC_IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
           NEXT_PUBLIC_IMGBB_UPLOAD_URL: 'https://api.imgbb.com/1/upload'
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
