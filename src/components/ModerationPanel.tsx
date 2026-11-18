@@ -121,9 +121,10 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     if (busy) return;
     setBusy(true);
     setError('');
-    const { error: resultError } = await supabase.rpc('tunnel_admin_waf_resync');
+    const { data, error: resultError } = await supabase.rpc('tunnel_admin_waf_resync');
     if (resultError) setError(resultError.message);
-    else setNotice('Cloudflare 同步請求已送出，請查看同步狀態。');
+    else if (data === true) setNotice('Cloudflare 已接受 IP 清單更新，請查看同步狀態。');
+    else setNotice('Cloudflare 尚未接受同步，請查看上方授權或錯誤提示。');
     await refresh();
     setBusy(false);
   }
