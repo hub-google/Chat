@@ -159,7 +159,7 @@ try {
         "    local:summary(smoke.pc.localDescription?.sdp||''),",
         "    remote:summary(smoke.pc.remoteDescription?.sdp||'')};",
         "})()"
-      ].join('\\n'));
+      ].join('\n'));
       console.log('ICE_DIAGNOSTIC '+JSON.stringify(report));
     }catch(failure){console.error('ICE diagnostics unavailable:',failure.message)}
   }
