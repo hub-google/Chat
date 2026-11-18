@@ -462,13 +462,21 @@ CREATE OR REPLACE FUNCTION public.fn_match_user(p_user_id uuid, p_intent charact
  SECURITY DEFINER
  SET search_path TO 'public'
 AS $function$
-DECLARE v_target_row RECORD; v_new_match_id UUID; v_existing public.matches%ROWTYPE;
+DECLARE v_target_row RECORD; v_new_match_id UUID; v_existing public.matches%ROWTYPE; v_my_queue_id UUID;
 BEGIN
   IF auth.uid() IS NULL OR auth.uid() <> p_user_id OR public.is_banned() THEN
     RAISE EXCEPTION 'Not authorized to match this user.';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+  -- A simultaneous attempt may otherwise match this user while another
+  -- transaction claims them as a target. Lock the caller's own queue row
+  -- before checking active matches or searching for another candidate.
+  -- SKIP LOCKED on target selection then excludes this user until commit.
+  SELECT id INTO v_my_queue_id
+  FROM public.matching_pool
+  WHERE user_id = p_user_id
+  FOR UPDATE;
   SELECT * INTO v_existing FROM public.matches
     WHERE p_user_id = ANY(participants) AND is_active
     ORDER BY created_at DESC LIMIT 1;
