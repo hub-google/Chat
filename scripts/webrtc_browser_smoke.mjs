@@ -82,6 +82,9 @@ const server = createServer((_request, response) => {
   response.end('<!doctype html><html lang="en"><title>Tunnel P2P Browser Smoke</title></html>');
 });
 let chrome;
+let chromeStopped = false;
+let chromeFailure = '';
+let chromeStderr = '';
 let socket;
 try {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -90,13 +93,22 @@ try {
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
     '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
     '--user-data-dir=' + dir, 'http://127.0.0.1:' + localPort,
-  ], { stdio: 'ignore' });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  chrome.stderr?.on('data', (chunk) => {
+    chromeStderr = (chromeStderr + String(chunk)).slice(-5000);
+  });
+  chrome.once('exit', (code, signal) => {
+    chromeStopped = true;
+    chromeFailure = 'Chrome exited (' + code + ', ' + signal + ')';
+  });
 
   const portFile = path.join(dir, 'DevToolsActivePort');
   const started = Date.now();
   while (!fs.existsSync(portFile)) {
-    if (chrome.exitCode !== null) throw new Error('Chrome exited before DevTools was ready');
-    if (Date.now() - started > 12000) throw new Error('Chrome DevTools startup timeout');
+    if (chromeStopped) throw new Error(chromeFailure + ': ' + chromeStderr);
+    if (Date.now() - started > 24000) {
+      throw new Error('Chrome DevTools startup timeout: ' + chromeStderr);
+    }
     await sleep(100);
   }
 
@@ -145,6 +157,7 @@ try {
     JSON.stringify(report.result.value));
 } catch (error) {
   console.error('FAIL: Chrome/WebRTC browser smoke:', error);
+  if (chromeStderr) console.error('Chrome stderr tail:', chromeStderr);
   process.exitCode = 1;
 } finally {
   socket?.close();
