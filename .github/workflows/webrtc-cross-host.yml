@@ -1,0 +1,33 @@
+name: Real cross-host WebRTC (Ubuntu and macOS)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/webrtc_cross_host_smoke.mjs'
+      - '.github/workflows/webrtc-cross-host.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: tunnel-crosshost-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  cross-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Cross-host STUN-only P2P connection and messaging
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: node scripts/webrtc_cross_host_smoke.mjs
