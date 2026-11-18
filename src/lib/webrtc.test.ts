@@ -127,6 +127,32 @@ describe('HTTP WebRTC handshake', () => {
     } finally { manager.close(); }
   });
 
+  it('switches to HTTP fallback when ICE disconnects and returns to P2P after recovery', async () => {
+    vi.mocked(getUserId).mockResolvedValueOnce('user-a').mockResolvedValueOnce('user-b');
+    const state = vi.fn();
+    const a = new WebRTCManager(vi.fn(), state);
+    const b = new WebRTCManager(vi.fn());
+    try {
+      await Promise.all([a.initConnection('match-ice', true), b.initConnection('match-ice', false)]);
+      const pc = FakePeerConnection.instances[0];
+      const channel = pc.channel!;
+      channel.readyState = 'open';
+      channel.onopen?.();
+      expect(state).toHaveBeenLastCalledWith('open');
+      pc.connectionState = 'disconnected';
+      pc.onconnectionstatechange?.();
+      expect(state).toHaveBeenLastCalledWith('closed');
+      pc.connectionState = 'connected';
+      pc.onconnectionstatechange?.();
+      expect(state).toHaveBeenLastCalledWith('open');
+      pc.connectionState = 'failed';
+      pc.onconnectionstatechange?.();
+      expect(state).toHaveBeenLastCalledWith('closed');
+    } finally {
+      a.close(); b.close();
+    }
+  });
+
   it('switches to fallback after denied or unavailable signaling', async () => {
     vi.mocked(getUserId).mockResolvedValue('user-a');
     vi.mocked(supabase.from).mockReturnValue({

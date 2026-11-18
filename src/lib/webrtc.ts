@@ -40,8 +40,12 @@ export class WebRTCManager {
 
     pc.onconnectionstatechange = () => {
       if (this.closing) return;
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      // A disconnected ICE path may leave DataChannel.readyState as "open".
+      // Switch to database polling immediately; switch back if ICE recovers.
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
         this.onConnectionState('closed');
+      } else if (pc.connectionState === 'connected' && this.dataChannel?.readyState === 'open') {
+        this.onConnectionState('open');
       }
     };
 

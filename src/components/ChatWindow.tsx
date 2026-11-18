@@ -3,6 +3,7 @@
 import React, { startTransition, useState, useEffect, useRef, useCallback } from 'react';
 import { useMatchStore } from '../store/matchStore';
 import { WebRTCManager } from '../lib/webrtc';
+import { readFallbackPages } from '../lib/fallbackPaging';
 import { supabase } from '../lib/supabase';
 import { TopicCards } from './TopicCards';
 import { Send, Image as ImageIcon, LogOut, CheckCircle2, CheckCheck, Sparkles, AlertTriangle } from 'lucide-react';
@@ -361,29 +362,44 @@ export function ChatWindow() {
       if (!active || reading) return;
       reading = true;
       try {
-        const { data, error } = await supabase
-          .from('messages')
-          .select('id,sender_id,content,type,created_at')
-          .eq('match_id', matchId)
-          .gt('created_at', since)
-          .order('created_at', { ascending: true })
-          .limit(100);
-        if (error || !active || !data) return;
-        for (const row of data) {
-          if (row.created_at > since) since = row.created_at;
-          if (row.type === 'system' && row.content?.includes('備用安全通道')) continue;
-          if (takeoverRole.current === 'target') continue;
-          setMessages((previous) => {
-            if (previous.some((item) => item.id === row.id)) return previous;
-            return [...previous, {
-              id: row.id,
-              sender: row.sender_id === myUserId.current ? 'me' : row.type === 'system' ? 'system' : 'peer',
-              ...(row.type === 'image' ? { imageUrl: row.content } : { text: row.content }),
-              timestamp: new Date(row.created_at).getTime(),
-              status: 'saved',
-            }];
-          });
-        }
+        // Inclusive timestamp + stable ID sorting prevents same-timestamp
+        // messages from being lost between polls. Drain all available pages.
+        const nextSince = await readFallbackPages(
+          since,
+          async (from, to, cursor) => {
+            const { data, error } = await supabase
+              .from('messages')
+              .select('id,sender_id,content,type,created_at')
+              .eq('match_id', matchId)
+              .gte('created_at', cursor)
+              .order('created_at', { ascending: true })
+              .order('id', { ascending: true })
+              .range(from, to);
+            return { data, error };
+          },
+          (rows) => {
+            if (!active) return;
+            const incoming: Message[] = rows
+              .filter(row => !(row.type === 'system' && row.content?.includes('備用安全通道')))
+              .filter(() => takeoverRole.current !== 'target')
+              .map(row => ({
+                id: row.id,
+                sender: row.sender_id === myUserId.current ? 'me' : row.type === 'system' ? 'system' : 'peer',
+                ...(row.type === 'image' ? { imageUrl: row.content } : { text: row.content }),
+                timestamp: new Date(row.created_at).getTime(),
+                status: 'saved' as const,
+              }));
+            if (!incoming.length) return;
+            setMessages(previous => {
+              const known = new Set(previous.map(item => item.id));
+              const fresh = incoming.filter(item => !known.has(item.id));
+              return fresh.length ? [...previous, ...fresh] : previous;
+            });
+          },
+        );
+        if (active) since = nextSince;
+      } catch (error) {
+        if (active) console.warn('HTTP fallback read failed; will retry from last cursor', error);
       } finally {
         reading = false;
       }
