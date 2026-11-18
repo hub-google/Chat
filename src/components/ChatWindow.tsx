@@ -301,43 +301,48 @@ export function ChatWindow() {
 
       // Match administration is low-frequency control-plane traffic. Active
       // P2P messages never go through these checks or the matching queue.
-      const statusPoll = setInterval(async () => {
-        // IP bans are enforced by SQL policies for database writes. The browser
-        // also closes an existing P2P session when moderation changes mid-chat.
-        const { data: allowed, error: accessError } = await supabase.rpc('tunnel_access_allowed');
-        if (!accessError && allowed === false) {
-          rtcManager.current?.sendMessage({ type: 'leave' });
-          rtcManager.current?.close();
-          setConnectionState('fallback');
-          setPeerLeft(true);
-          setNotice('此 IP 已被管理員暫時封鎖，無法繼續聊天。');
-          return;
-        }
-        const { data, error } = await supabase
-          .from('matches')
-          .select('is_active,is_taken_over,takeover_target')
-          .eq('id', matchId)
-          .single();
-        if (error || !data) return;
-        if (data.is_taken_over && !takeoverRole.current) {
-          rtcManager.current?.close();
-          setPeerTyping(false);
-          setConnectionState('fallback');
-          if (data.takeover_target === myUserId.current) {
-            takeoverRole.current = 'target';
+      let controlPollRunning = false;
+      let active = true;
+      const checkRoomControl = async () => {
+        if (!active || controlPollRunning) return;
+        controlPollRunning = true;
+        try {
+          // One HTTP request for both active-room state and IP moderation.
+          // RLS remains enforced: the RPC runs with the caller's permissions.
+          const { data, error } = await supabase.rpc('tunnel_room_control', { p_match_id: matchId });
+          if (!active || error || !data) return;
+          if (data.allowed === false) {
+            rtcManager.current?.sendMessage({ type: 'leave' });
+            rtcManager.current?.close();
+            setConnectionState('fallback');
             setPeerLeft(true);
-            setNotice('對方已離開');
-          } else {
-            takeoverRole.current = 'remaining';
-            setNotice('');
+            setNotice('此 IP 已被管理員暫時封鎖，無法繼續聊天。');
+            return;
           }
-        } else if (data.is_active === false) {
-          rtcManager.current?.close();
-          setPeerLeft(true);
-          setNotice('對方已離開聊天室。');
+          if (data.is_taken_over && !takeoverRole.current) {
+            rtcManager.current?.close();
+            setPeerTyping(false);
+            setConnectionState('fallback');
+            if (data.takeover_target === myUserId.current) {
+              takeoverRole.current = 'target';
+              setPeerLeft(true);
+              setNotice('對方已離開');
+            } else {
+              takeoverRole.current = 'remaining';
+              setNotice('');
+            }
+          } else if (data.is_active !== true) {
+            rtcManager.current?.close();
+            setPeerLeft(true);
+            setNotice('聊天室已結束或無法再存取。');
+          }
+        } finally {
+          controlPollRunning = false;
         }
-      }, 5000);
+      };
+      const statusPoll = setInterval(() => { void checkRoomControl(); }, 5000);
       return () => {
+        active = false;
         clearInterval(statusPoll);
         rtcManager.current?.close();
       };

@@ -70,3 +70,10 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - 期限由資料庫 `expires_at > now()` 判定，自動失效，不用 Workers、Cron 或額外輪詢。被封鎖者的配對、訊息寫入和訊號交換受 RLS／RPC 阻擋；首頁有拒絕畫面，聊天中每 5 秒檢查權限並關閉 P2P 通道。
 
 **網站入口限制：** 目前正式網站為 GitHub Pages，並非 Cloudflare 代理的 CHAT 網域，因此 SQL 封鎖**不能**在 HTTP 入口拒絕訪客取得靜態 HTML，也無法封鎖訪客直接存取 `github.io`。要達成真正的網路層封鎖，必須先將正式 CHAT 網址連至 Cloudflare 代理，再透過安全後端將封鎖清單同步到限定 CHAT 網域的 WAF 自訂規則；絕不可把 Cloudflare API token 放在前端。此部分**尚未啟用**，後台會明示目前是資料庫封鎖。
+
+## HTTP 控制流量優化與驗證
+
+- `tunnel_room_control` 在單次資料庫 RPC 中檢查 IP 封鎖及房間狀態，不需每 5 秒發出兩筆 HTTP 請求；使用 SECURITY INVOKER 維持原有 RLS。
+- `fn_match_user` 在查找配對對象前先鎖定自己的等待池紀錄，避免並發配對重複取走同一人。
+- 新環境的 `supabase_init.sql` 已包含 IP／常見文字管理與聊天室控制 RPC；既有環境透過個別 migration 更新。
+- 資料庫已完成 20 組配對、訊號交換、第三人拒絕讀取、P2P 失敗後的 HTTP 訊息備援、離開後補傳等回滾式驗證；尚未視為跨網路雙裝置壓測。
