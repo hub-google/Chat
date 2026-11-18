@@ -48,6 +48,15 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
           NEXT_PUBLIC_IMGBB_UPLOAD_URL: 'https://api.imgbb.com/1/upload'
+      - name: Check optional image-upload configuration
+        env:
+          NEXT_PUBLIC_IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
+        run: |
+          if [ -n "$NEXT_PUBLIC_IMGBB_API_KEY" ]; then
+            echo 'ImgBB upload key configured for main test build.'
+          else
+            echo '::warning::NEXT_PUBLIC_IMGBB_API_KEY is missing; image uploading will be unavailable.'
+          fi
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -71,3 +80,9 @@ jobs:
           test -s /tmp/chat-main-admin.html
           grep -q '<html' /tmp/chat-main-admin.html
           ! grep -q 'chat-canonical-host' /tmp/chat-main-admin.html
+          for route in '' 'admin/' 'admin/analytics/' 'admin/reports/'; do
+            curl --fail --location --retry 5 --retry-delay 3 --max-time 30 \
+              --output /tmp/chat-main-route.html "https://hub-google.github.io/Chat/${route}"
+            test -s /tmp/chat-main-route.html
+            grep -q '<html' /tmp/chat-main-route.html
+          done
