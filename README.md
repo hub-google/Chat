@@ -77,3 +77,4 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - `fn_match_user` 在查找配對對象前先鎖定自己的等待池紀錄，避免並發配對重複取走同一人。
 - 新環境的 `supabase_init.sql` 已包含 IP／常見文字管理與聊天室控制 RPC；既有環境透過個別 migration 更新。
 - 資料庫已完成 20 組配對、訊號交換、第三人拒絕讀取、P2P 失敗後的 HTTP 訊息備援、離開後補傳等回滾式驗證；尚未視為跨網路雙裝置壓測。
+- 取消配對改由 `tunnel_cancel_matching` RPC 在同一交易中鎖定等待者、取消排隊及結束剛好同時成立的房間，避免產生孤立的聊天室。
