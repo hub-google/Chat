@@ -29,3 +29,10 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
           NEXT_PUBLIC_IMGBB_UPLOAD_URL: 'https://api.imgbb.com/1/upload'
+      - name: Verify CHAT production hostname and admin route
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 30 \
+            --output /tmp/chat-admin.html 'https://chat.monsterport.com/admin/moderation/'
+          test -s /tmp/chat-admin.html
+          grep -q '<html' /tmp/chat-admin.html
