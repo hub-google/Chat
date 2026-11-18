@@ -19,6 +19,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Browser WebRTC P2P smoke (real Chrome, no Supabase quota)
+        run: node scripts/webrtc_browser_smoke.mjs
       - run: npm run lint
       - run: npm run build
         env:

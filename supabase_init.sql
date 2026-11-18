@@ -322,35 +322,35 @@ USING ((SELECT auth.uid()) = id OR (SELECT public.is_admin()));
 
 CREATE POLICY "Users can update own profile"
 ON public.profiles FOR UPDATE TO authenticated
-USING ((auth.uid() = id AND NOT public.is_banned()) OR public.is_admin())
-WITH CHECK ((auth.uid() = id AND role = 'user') OR public.is_admin());
+USING (((SELECT auth.uid()) = id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()))
+WITH CHECK (((SELECT auth.uid()) = id AND role = 'user') OR (SELECT public.is_admin()));
 
 CREATE POLICY "Users can insert own profile"
 ON public.profiles FOR INSERT TO authenticated
-WITH CHECK (auth.uid() = id AND role = 'user');
+WITH CHECK ((SELECT auth.uid()) = id AND role = 'user');
 
 CREATE POLICY "Users manage own queue row"
 ON public.matching_pool FOR ALL TO authenticated
-USING ((auth.uid() = user_id AND NOT public.is_banned()) OR public.is_admin())
-WITH CHECK ((auth.uid() = user_id AND NOT public.is_banned()) OR public.is_admin());
+USING (((SELECT auth.uid()) = user_id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()))
+WITH CHECK (((SELECT auth.uid()) = user_id AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()));
 
 CREATE POLICY "Participants or admins can view matches"
 ON public.matches FOR SELECT TO authenticated
-USING (((auth.uid() = ANY(participants) OR auth.uid() = takeover_target) AND NOT public.is_banned()) OR public.is_admin());
+USING ((((SELECT auth.uid()) = ANY(participants) OR (SELECT auth.uid()) = takeover_target) AND NOT (SELECT public.is_banned())) OR (SELECT public.is_admin()));
 
 CREATE POLICY "Messages read policy with takeover isolation"
 ON public.messages FOR SELECT TO authenticated
 USING (
-    NOT public.is_banned() AND (
-        public.is_admin()
+    NOT (SELECT public.is_banned()) AND (
+        (SELECT public.is_admin())
         OR EXISTS (
             SELECT 1 FROM public.matches
-            WHERE id = messages.match_id AND auth.uid() = ANY(participants)
+            WHERE id = messages.match_id AND (SELECT auth.uid()) = ANY(participants)
         )
         OR EXISTS (
             SELECT 1 FROM public.matches
             WHERE id = messages.match_id
-              AND takeover_target = auth.uid()
+              AND takeover_target = (SELECT auth.uid())
               AND messages.created_at <= takeover_at
         )
     )
@@ -383,31 +383,31 @@ WITH CHECK (
 
 CREATE POLICY "Users can create chat_reports"
 ON public.chat_reports FOR INSERT TO authenticated
-WITH CHECK (auth.uid() = reporter_id AND NOT public.is_banned());
+WITH CHECK ((SELECT auth.uid()) = reporter_id AND NOT (SELECT public.is_banned()));
 
 CREATE POLICY "Admins can review chat_reports"
 ON public.chat_reports FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Everyone can read active topic categories"
 ON public.topic_categories FOR SELECT TO authenticated
-USING (is_active = TRUE OR public.is_admin());
+USING (is_active = TRUE OR (SELECT public.is_admin()));
 
 CREATE POLICY "Everyone can read active topic cards"
 ON public.topic_cards FOR SELECT TO authenticated
-USING (is_active = TRUE OR public.is_admin());
+USING (is_active = TRUE OR (SELECT public.is_admin()));
 
 CREATE POLICY "Admins can manage topic categories"
 ON public.topic_categories FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Admins can manage topic cards"
 ON public.topic_cards FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 CREATE POLICY "Admins can access takeover logs"
 ON public.admin_takeovers FOR ALL TO authenticated
-USING (public.is_admin()) WITH CHECK (public.is_admin());
+USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
 -- ========================================================
 -- 4. 自動化函數與預寫程序 (STORED PROCEDURES & TRIGGERS)
@@ -462,13 +462,21 @@ CREATE OR REPLACE FUNCTION public.fn_match_user(p_user_id uuid, p_intent charact
  SECURITY DEFINER
  SET search_path TO 'public'
 AS $function$
-DECLARE v_target_row RECORD; v_new_match_id UUID; v_existing public.matches%ROWTYPE;
+DECLARE v_target_row RECORD; v_new_match_id UUID; v_existing public.matches%ROWTYPE; v_my_queue_id UUID;
 BEGIN
   IF auth.uid() IS NULL OR auth.uid() <> p_user_id OR public.is_banned() THEN
     RAISE EXCEPTION 'Not authorized to match this user.';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+  -- A simultaneous attempt may otherwise match this user while another
+  -- transaction claims them as a target. Lock the caller's own queue row
+  -- before checking active matches or searching for another candidate.
+  -- SKIP LOCKED on target selection then excludes this user until commit.
+  SELECT id INTO v_my_queue_id
+  FROM public.matching_pool
+  WHERE user_id = p_user_id
+  FOR UPDATE;
   SELECT * INTO v_existing FROM public.matches
     WHERE p_user_id = ANY(participants) AND is_active
     ORDER BY created_at DESC LIMIT 1;
@@ -700,11 +708,11 @@ DROP POLICY IF EXISTS "Tunnel participants read signals" ON public.tunnel_webrtc
 CREATE POLICY "Tunnel participants read signals"
 ON public.tunnel_webrtc_signals FOR SELECT TO authenticated
 USING (
-  NOT public.is_banned()
+  NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
@@ -712,12 +720,12 @@ DROP POLICY IF EXISTS "Tunnel participants create own signals" ON public.tunnel_
 CREATE POLICY "Tunnel participants create own signals"
 ON public.tunnel_webrtc_signals FOR INSERT TO authenticated
 WITH CHECK (
-  NOT public.is_banned()
-  AND sender_id = auth.uid()
+  NOT (SELECT public.is_banned())
+  AND sender_id = (SELECT auth.uid())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
@@ -725,21 +733,21 @@ DROP POLICY IF EXISTS "Tunnel participants replace own signals" ON public.tunnel
 CREATE POLICY "Tunnel participants replace own signals"
 ON public.tunnel_webrtc_signals FOR UPDATE TO authenticated
 USING (
-  sender_id = auth.uid()
-  AND NOT public.is_banned()
+  sender_id = (SELECT auth.uid())
+  AND NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 )
 WITH CHECK (
-  sender_id = auth.uid()
-  AND NOT public.is_banned()
+  sender_id = (SELECT auth.uid())
+  AND NOT (SELECT public.is_banned())
   AND EXISTS (
     SELECT 1 FROM public.matches m
     WHERE m.id = match_id AND m.is_active = TRUE
-      AND auth.uid() = ANY(m.participants)
+      AND (SELECT auth.uid()) = ANY(m.participants)
   )
 );
 
@@ -840,3 +848,311 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.tunnel_admin_ban_user(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.tunnel_admin_ban_user(uuid) TO authenticated;
+
+-- IP abuse moderation included for new installations; legacy script is a
+-- one-time upgrade path for existing projects.
+-- CHAT IP and phrase moderation. No user-facing access to private source/bans tables.
+CREATE SCHEMA IF NOT EXISTS private;
+REVOKE ALL ON SCHEMA private FROM PUBLIC, anon, authenticated;
+
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_device TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_browser TEXT;
+
+CREATE TABLE IF NOT EXISTS private.tunnel_message_sources (
+  message_id UUID PRIMARY KEY REFERENCES public.messages(id) ON DELETE CASCADE,
+  ip INET,
+  ip_source TEXT NOT NULL CHECK (ip_source IN ('gateway','profile_latest','unknown')),
+  location_zh TEXT,
+  device TEXT,
+  browser TEXT,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tunnel_message_sources_ip_idx ON private.tunnel_message_sources(ip);
+CREATE INDEX IF NOT EXISTS tunnel_messages_recent_text_idx ON public.messages(created_at DESC) WHERE type = 'text';
+
+CREATE TABLE IF NOT EXISTS private.tunnel_ip_bans (
+  ip INET PRIMARY KEY,
+  expires_at TIMESTAMPTZ NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tunnel_ip_bans_expiry_idx ON private.tunnel_ip_bans(expires_at);
+REVOKE ALL ON ALL TABLES IN SCHEMA private FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION private.tunnel_safe_ip(p_value TEXT)
+RETURNS INET LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+BEGIN
+  IF NULLIF(btrim(p_value), '') IS NULL THEN RETURN NULL; END IF;
+  RETURN btrim(p_value)::inet;
+EXCEPTION WHEN invalid_text_representation OR invalid_parameter_value THEN
+  RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_request_ip()
+RETURNS INET LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE v_headers JSONB; v_forwarded TEXT;
+BEGIN
+  v_headers := NULLIF(current_setting('request.headers', true), '')::jsonb;
+  -- Standard Supabase/PostgREST gateway header, never from profile input.
+  v_forwarded := NULLIF(btrim(split_part(COALESCE(v_headers->>'x-forwarded-for', ''), ',', 1)), '');
+  IF v_forwarded IS NULL THEN RETURN NULL; END IF;
+  RETURN v_forwarded::inet;
+EXCEPTION WHEN invalid_text_representation OR invalid_parameter_value THEN
+  RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.tunnel_request_ip() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.tunnel_request_ip() TO authenticated;
+
+CREATE OR REPLACE FUNCTION private.tunnel_capture_message_source()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, private AS $$
+DECLARE v_profile RECORD; v_ip INET;
+BEGIN
+  SELECT last_ip,last_ip_location_zh,last_device,last_browser INTO v_profile
+  FROM public.profiles WHERE id = NEW.sender_id;
+  v_ip := public.tunnel_request_ip();
+  INSERT INTO private.tunnel_message_sources(message_id,ip,ip_source,location_zh,device,browser)
+  VALUES (
+    NEW.id,
+    COALESCE(v_ip, private.tunnel_safe_ip(v_profile.last_ip)),
+    CASE WHEN v_ip IS NOT NULL THEN 'gateway'
+         WHEN private.tunnel_safe_ip(v_profile.last_ip) IS NOT NULL THEN 'profile_latest'
+         ELSE 'unknown' END,
+    v_profile.last_ip_location_zh,v_profile.last_device,v_profile.last_browser
+  ) ON CONFLICT (message_id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS tunnel_message_ip_snapshot ON public.messages;
+CREATE TRIGGER tunnel_message_ip_snapshot AFTER INSERT ON public.messages
+  FOR EACH ROW EXECUTE FUNCTION private.tunnel_capture_message_source();
+REVOKE ALL ON FUNCTION private.tunnel_capture_message_source() FROM PUBLIC,anon,authenticated;
+
+CREATE OR REPLACE FUNCTION public.is_banned()
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, private AS $$
+DECLARE v_ip INET;
+BEGIN
+  -- Keep administrators able to revoke accidentally overbroad bans in app.
+  IF public.is_admin() THEN RETURN FALSE; END IF;
+  IF EXISTS (SELECT 1 FROM public.profiles WHERE id=auth.uid() AND status='banned') THEN
+    RETURN TRUE;
+  END IF;
+  v_ip := public.tunnel_request_ip();
+  RETURN v_ip IS NOT NULL AND EXISTS (
+    SELECT 1 FROM private.tunnel_ip_bans WHERE ip=v_ip AND expires_at > now()
+  );
+END;
+$$;
+REVOKE ALL ON FUNCTION public.is_banned() FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.is_banned() TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.tunnel_access_allowed()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog,public AS $$
+  SELECT auth.uid() IS NOT NULL AND NOT public.is_banned();
+$$;
+REVOKE ALL ON FUNCTION public.tunnel_access_allowed() FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.tunnel_access_allowed() TO authenticated;
+
+CREATE OR REPLACE FUNCTION private.tunnel_ban_period(p_duration TEXT)
+RETURNS INTERVAL LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $$
+BEGIN
+  RETURN CASE p_duration
+    WHEN '5m' THEN interval '5 minutes'
+    WHEN '30m' THEN interval '30 minutes'
+    WHEN '1h' THEN interval '1 hour'
+    WHEN '6h' THEN interval '6 hours'
+    WHEN '24h' THEN interval '24 hours'
+    WHEN '7d' THEN interval '7 days'
+    WHEN '30d' THEN interval '30 days'
+    WHEN '1y' THEN interval '1 year'
+    WHEN '10y' THEN interval '10 years'
+    ELSE NULL END;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_phrase_ranking(p_hours INTEGER DEFAULT 24)
+RETURNS TABLE(phrase TEXT, message_count BIGINT, sender_count BIGINT, ip_count BIGINT)
+LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = pg_catalog,public,private AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  IF p_hours NOT IN (1,6,24) THEN RAISE EXCEPTION 'Unsupported time range'; END IF;
+  RETURN QUERY
+  SELECT regexp_replace(btrim(m.content), '[[:space:]]+', ' ', 'g') AS phrase,
+         count(*) AS message_count,
+         count(DISTINCT m.sender_id) AS sender_count,
+         count(DISTINCT CASE WHEN s.ip_source='gateway' THEN s.ip END) AS ip_count
+  FROM public.messages m
+  LEFT JOIN private.tunnel_message_sources s ON s.message_id=m.id
+  LEFT JOIN public.profiles p ON p.id=m.sender_id
+  WHERE m.type='text' AND m.created_at >= now()-make_interval(hours=>p_hours)
+    AND length(btrim(m.content))>0
+    AND COALESCE(p.role,'user')<>'admin'
+  GROUP BY 1 ORDER BY message_count DESC, sender_count DESC, phrase ASC LIMIT 100;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_phrase_sources(p_hours INTEGER,p_phrase TEXT)
+RETURNS TABLE(ip TEXT, source_quality TEXT, country TEXT, region TEXT, district TEXT, device TEXT, browser TEXT, message_count BIGINT, sender_count BIGINT, last_seen TIMESTAMPTZ)
+LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = pg_catalog,public,private AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  IF p_hours NOT IN (1,6,24) OR length(p_phrase) > 4000 THEN RAISE EXCEPTION 'Invalid query'; END IF;
+  RETURN QUERY
+  WITH hits AS (
+    SELECT COALESCE(s.ip,private.tunnel_safe_ip(p.last_ip)) AS src_ip,
+           CASE WHEN s.ip IS NOT NULL THEN s.ip_source ELSE 'profile_latest' END AS quality,
+           COALESCE(s.location_zh,p.last_ip_location_zh,'') AS loc,
+           COALESCE(s.device,p.last_device,'') AS dev,
+           COALESCE(s.browser,p.last_browser,'') AS brow,
+           m.sender_id AS uid,m.created_at AS at
+    FROM public.messages m
+    LEFT JOIN private.tunnel_message_sources s ON s.message_id=m.id
+    LEFT JOIN public.profiles p ON p.id=m.sender_id
+    WHERE m.type='text' AND m.created_at >= now()-make_interval(hours=>p_hours)
+      AND regexp_replace(btrim(m.content),'[[:space:]]+',' ','g')=p_phrase
+      AND COALESCE(p.role,'user')<>'admin'
+  )
+  SELECT host(h.src_ip),
+         CASE WHEN bool_and(h.quality='gateway') THEN 'gateway' ELSE 'estimated' END,
+         NULLIF(split_part(max(h.loc),'／',1),''),
+         NULLIF(split_part(max(h.loc),'／',2),''),
+         NULLIF(split_part(max(h.loc),'／',3),''),
+         NULLIF(max(h.dev),''),
+         NULLIF(max(h.brow),''),
+         count(*),count(DISTINCT h.uid),max(h.at)
+  FROM hits h
+  GROUP BY h.src_ip
+  ORDER BY count(*) DESC, h.src_ip::text NULLS LAST LIMIT 300;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_ban_ip(p_ip TEXT,p_duration TEXT,p_reason TEXT DEFAULT '手動封鎖')
+RETURNS TIMESTAMPTZ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,public,private AS $$
+DECLARE v_ip INET; v_period INTERVAL; v_until TIMESTAMPTZ;
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  v_ip := private.tunnel_safe_ip(p_ip);
+  v_period := private.tunnel_ban_period(p_duration);
+  IF v_ip IS NULL OR v_period IS NULL THEN RAISE EXCEPTION 'Invalid IP or duration'; END IF;
+  IF v_ip = public.tunnel_request_ip() THEN RAISE EXCEPTION 'Cannot ban your current IP'; END IF;
+  v_until := now()+v_period;
+  INSERT INTO private.tunnel_ip_bans(ip,expires_at,reason,created_by)
+  VALUES (v_ip,v_until,left(coalesce(p_reason,''),400),auth.uid())
+  ON CONFLICT(ip) DO UPDATE SET expires_at=EXCLUDED.expires_at,
+    reason=EXCLUDED.reason,created_by=EXCLUDED.created_by,created_at=now()
+  RETURNING expires_at INTO v_until;
+  RETURN v_until;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_ban_phrase(p_hours INTEGER,p_phrase TEXT,p_duration TEXT)
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,public,private AS $$
+DECLARE v_period INTERVAL; v_count INTEGER; v_own_ip INET;
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  v_period:=private.tunnel_ban_period(p_duration);
+  IF p_hours NOT IN (1,6,24) OR v_period IS NULL OR length(p_phrase)>4000 OR length(btrim(p_phrase))=0
+     THEN RAISE EXCEPTION 'Invalid moderation request'; END IF;
+  v_own_ip:=public.tunnel_request_ip();
+  WITH sources AS (
+    SELECT DISTINCT s.ip AS ip
+    FROM public.messages m
+    LEFT JOIN private.tunnel_message_sources s ON s.message_id=m.id
+    LEFT JOIN public.profiles p ON p.id=m.sender_id
+    WHERE m.type='text' AND m.created_at >= now()-make_interval(hours=>p_hours)
+      AND regexp_replace(btrim(m.content),'[[:space:]]+',' ','g')=p_phrase
+      AND COALESCE(p.role,'user')<>'admin'
+      AND s.ip_source='gateway'
+  ), changed AS (
+    INSERT INTO private.tunnel_ip_bans(ip,expires_at,reason,created_by)
+      SELECT ip,now()+v_period,'常見文字：'||left(p_phrase,300),auth.uid()
+      FROM sources WHERE ip IS NOT NULL AND (v_own_ip IS NULL OR ip<>v_own_ip)
+    ON CONFLICT(ip) DO UPDATE SET
+      expires_at=GREATEST(private.tunnel_ip_bans.expires_at,EXCLUDED.expires_at),
+      reason=EXCLUDED.reason,created_by=EXCLUDED.created_by,created_at=now()
+    RETURNING ip
+  ) SELECT count(*) INTO v_count FROM changed;
+  RETURN v_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_list_ip_bans()
+RETURNS TABLE(ip TEXT, expires_at TIMESTAMPTZ, reason TEXT, created_at TIMESTAMPTZ, is_active BOOLEAN)
+LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = pg_catalog,public,private AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  RETURN QUERY SELECT host(b.ip),b.expires_at,b.reason,b.created_at,b.expires_at>now()
+  FROM private.tunnel_ip_bans b ORDER BY (b.expires_at>now()) DESC,b.created_at DESC LIMIT 300;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tunnel_admin_unban_ip(p_ip TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,public,private AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Administrator required'; END IF;
+  DELETE FROM private.tunnel_ip_bans WHERE ip=private.tunnel_safe_ip(p_ip);
+  RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.tunnel_safe_ip(TEXT),private.tunnel_ban_period(TEXT) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.tunnel_admin_phrase_ranking(INTEGER),public.tunnel_admin_phrase_sources(INTEGER,TEXT),
+  public.tunnel_admin_ban_ip(TEXT,TEXT,TEXT),public.tunnel_admin_ban_phrase(INTEGER,TEXT,TEXT),
+  public.tunnel_admin_list_ip_bans(),public.tunnel_admin_unban_ip(TEXT) FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.tunnel_admin_phrase_ranking(INTEGER),public.tunnel_admin_phrase_sources(INTEGER,TEXT),
+  public.tunnel_admin_ban_ip(TEXT,TEXT,TEXT),public.tunnel_admin_ban_phrase(INTEGER,TEXT,TEXT),
+  public.tunnel_admin_list_ip_bans(),public.tunnel_admin_unban_ip(TEXT) TO authenticated;
+
+-- Single RLS-respecting check for moderation + chat room state.
+CREATE OR REPLACE FUNCTION public.tunnel_room_control(p_match_id uuid)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER SET search_path = ''
+AS $$
+  SELECT jsonb_build_object(
+    'allowed', public.tunnel_access_allowed(),
+    'is_active', room.is_active,
+    'is_taken_over', room.is_taken_over,
+    'takeover_target', room.takeover_target
+  )
+  FROM (SELECT 1) driver
+  LEFT JOIN LATERAL (
+    SELECT m.is_active, m.is_taken_over, m.takeover_target
+    FROM public.matches m WHERE m.id = p_match_id
+  ) room ON true;
+$$;
+REVOKE ALL ON FUNCTION public.tunnel_room_control(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.tunnel_room_control(uuid) TO authenticated;
+
+-- Transactional cancellation of waiting users and just-created matches.
+CREATE OR REPLACE FUNCTION public.tunnel_cancel_matching()
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_waiting_id uuid;
+  v_match record;
+  v_changed boolean := false;
+BEGIN
+  IF v_user IS NULL THEN
+    RAISE EXCEPTION 'Authentication required' USING ERRCODE='42501';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_user::text, 0));
+  SELECT q.id INTO v_waiting_id FROM public.matching_pool q
+    WHERE q.user_id = v_user FOR UPDATE;
+  DELETE FROM public.matching_pool WHERE user_id = v_user;
+  IF v_waiting_id IS NOT NULL THEN v_changed := true; END IF;
+  FOR v_match IN
+    SELECT id FROM public.matches WHERE is_active=true AND v_user=ANY(participants)
+    ORDER BY created_at DESC FOR UPDATE
+  LOOP
+    PERFORM public.leave_match(v_match.id);
+    v_changed := true;
+  END LOOP;
+  UPDATE public.profiles SET status='online',updated_at=now()
+    WHERE id=v_user AND status='matching';
+  RETURN v_changed;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.tunnel_cancel_matching() FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.tunnel_cancel_matching() TO authenticated;

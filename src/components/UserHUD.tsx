@@ -265,8 +265,9 @@ export function UserHUD() {
 
       const matchData = data?.[0];
       if (useMatchStore.getState().status !== 'waiting') {
-        if (matchData?.match_id) await supabase.rpc('leave_match', { p_match_id: matchData.match_id });
-        else await supabase.from('matching_pool').delete().eq('user_id', userId);
+        // The user cancelled while matchmaking was in flight. The RPC
+        // atomically cleans both a waiting row and any newly created room.
+        await supabase.rpc('tunnel_cancel_matching');
         return;
       }
       if (matchData && matchData.match_id) {
@@ -286,8 +287,9 @@ export function UserHUD() {
     setStatus('idle');
     setErrorMsg('');
     try {
-      const userId = await getUserId();
-      const { error } = await supabase.from('matching_pool').delete().eq('user_id', userId);
+      // A single transaction also closes a match created concurrently with
+      // the cancellation. Plain deletion of matching_pool was not sufficient.
+      const { error } = await supabase.rpc('tunnel_cancel_matching');
       if (error) setErrorMsg(`取消配對失敗：${error.message}`);
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : '取消配對失敗。');
