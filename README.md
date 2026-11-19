@@ -100,3 +100,13 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - 只有合併至 `release` 才會更新 `https://chat.monsterport.com/`，Cloudflare 專案的 production branch 已調為 `release`，preview deployments 關閉。
 - GitHub Actions `.github/workflows/deploy.yml` 僅在 `main` push 觸發，並在部署後測試管理後台路由；`.github/workflows/verify.yml` 驗證 `main` 及要合併進 `release` 的 PR。
 - `main` 已移除從 GitHub Pages 強制跳轉 Cloudflare 的程式，測試站可以直接瀏覽。
+
+
+## 2026-11-19 IP 隱性配對限制（取代舊的入口硬封鎖）
+
+- 管理員的「IP 封鎖」現在是 **隱性配對限制**：被限制者可以進入網站、操作配對、看到正常等待畫面，但 `fn_match_user` 只回傳一般等待結果，不會建立配對，也不會進入可被其他人選中的等待池。
+- 伺服器以 Supabase 請求來源 IP 判定，並維護私有的配對來源 IP 記錄；已被限制的等待名單會在管理員封鎖時清理。若使用者變更網路 IP，須另行封鎖新 IP。
+- 此封鎖不發送「已封鎖」錯誤或通知；已在聊天中的連線中斷只顯示一般網路訊息。直接使用 API 的技術性探測仍可能觀察到限制，不能承諾絕對無法察覺。
+- 既有 Cloudflare CHAT 專用 IP 拒絕規則已停用，WAF 同步觸發器及排程停止，避免被封鎖者在網站入口看到明確阻擋。一般 Cloudflare 安全防護不受影響。
+- 已有 Supabase 專案套用 `scripts/tunnel_shadow_ip_matching.sql`；新環境請先執行 `supabase_init.sql` 再套用該 migration。
+- 此規則只在指定期限內生效；到期或管理員解封後恢復正常配對。測試分支 main 與 release 仍須按既定流程分別發布。
