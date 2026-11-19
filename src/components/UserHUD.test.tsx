@@ -49,7 +49,7 @@ describe('UserHUD', () => {
     vi.clearAllMocks();
     localStorage.clear();
     useMatchStore.getState().reset();
-    // The real app checks IP bans before obtaining geolocation or matching.
+    // The server performs silent IP matching restrictions; the UI never displays them.
     (supabase.rpc as any).mockImplementation((name: string) =>
       Promise.resolve(name === 'tunnel_access_allowed'
         ? { data: true, error: null }
@@ -100,26 +100,31 @@ describe('UserHUD', () => {
     });
   });
 
-  it('blocks banned IPs before reading location or creating a match', async () => {
+  it('keeps an IP-restricted visitor on the ordinary waiting screen', async () => {
     (fingerprint.generateDeviceFingerprint as any).mockResolvedValue('mocked-fingerprint');
     (supabase.auth.getUser as any).mockResolvedValue({
       data: { user: { id: 'mock-user-123' } },
       error: null,
     });
-    (supabase.rpc as any).mockImplementation((name: string) =>
-      Promise.resolve(name === 'tunnel_access_allowed'
-        ? { data: false, error: null }
-        : { data: [{ match_id: 'mock-match-456' }], error: null }),
+    mockGeolocation.getCurrentPosition.mockImplementation(success =>
+      success({ coords: { latitude: 25.0, longitude: 121.5 } })
     );
+    // The server privately returns the same no-match result as an empty queue.
+    (supabase.rpc as any).mockResolvedValue({
+      data: [{ match_id: null, matched_user_id: null }],
+      error: null,
+    });
 
     render(<UserHUD />);
     fireEvent.click(screen.getByText(/開始匿名配對/i));
 
     await waitFor(() => {
-      expect(screen.getByText(/此 IP 已被管理員暫時封鎖/i)).toBeInTheDocument();
+      expect(supabase.rpc).toHaveBeenCalledWith('fn_match_user', expect.anything());
+      expect(screen.getByText(/取消搜尋/i)).toBeInTheDocument();
     });
-    expect(mockGeolocation.getCurrentPosition).not.toHaveBeenCalled();
-    expect(supabase.rpc).not.toHaveBeenCalledWith('fn_match_user', expect.anything());
+    expect(screen.getByText(/尋找配對中/i)).toBeInTheDocument();
+    expect(screen.queryByText(/封鎖|禁止進入|IP 已被/i)).not.toBeInTheDocument();
+    expect(useMatchStore.getState().status).toBe('waiting');
   });
 
   it('handles auth error gracefully if not authenticated', async () => {
