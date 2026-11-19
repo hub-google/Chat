@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { AlertTriangle, Ban, ChevronDown, ChevronRight, RefreshCw, ShieldOff, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Ban, ChevronDown, ChevronRight, RefreshCw, ShieldOff, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import styles from './ModerationPanel.module.css';
 
@@ -14,7 +14,6 @@ type Source = {
   message_count: number; sender_count: number; last_seen: string;
 };
 type BanRow = { ip: string; expires_at: string; reason: string; created_at: string; is_active: boolean };
-type WafStatus = { configured: boolean; active_bans: number; last_attempt_at: string | null; last_accepted_at: string | null; last_http_status: number | null; last_error: string | null };
 
 const durations: { value: BanDuration; label: string }[] = [
   { value: '5m', label: '5 分鐘' }, { value: '30m', label: '30 分鐘' },
@@ -32,9 +31,6 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
   const [phrases, setPhrases] = useState<Phrase[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [bans, setBans] = useState<BanRow[]>([]);
-  const [waf, setWaf] = useState<WafStatus | null>(null);
-  const [wafToken, setWafToken] = useState('');
-  const [editWafToken, setEditWafToken] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [manualIp, setManualIp] = useState('');
   const [busy, setBusy] = useState(false);
@@ -46,13 +42,12 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError('');
-    const [ranked, active, sync] = await Promise.all([
+    const [ranked, active] = await Promise.all([
       supabase.rpc('tunnel_admin_phrase_ranking', { p_hours: hours }),
       supabase.rpc('tunnel_admin_list_ip_bans'),
-      supabase.rpc('tunnel_admin_waf_status'),
     ]);
-    if (ranked.error || active.error || sync.error) setError(ranked.error?.message ?? active.error?.message ?? sync.error?.message ?? '查詢失敗');
-    else { setPhrases((ranked.data ?? []) as Phrase[]); setBans((active.data ?? []) as BanRow[]); setWaf((sync.data?.[0] ?? null) as WafStatus | null); }
+    if (ranked.error || active.error) setError(ranked.error?.message ?? active.error?.message ?? '查詢失敗');
+    else { setPhrases((ranked.data ?? []) as Phrase[]); setBans((active.data ?? []) as BanRow[]); }
     setLoading(false);
   }, [hours]);
 
@@ -63,14 +58,12 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     void Promise.all([
       supabase.rpc('tunnel_admin_phrase_ranking', { p_hours: hours }),
       supabase.rpc('tunnel_admin_list_ip_bans'),
-      supabase.rpc('tunnel_admin_waf_status'),
-    ]).then(([ranked, currentBans, sync]) => {
+    ]).then(([ranked, currentBans]) => {
       if (!active) return;
-      if (ranked.error || currentBans.error || sync.error) setError(ranked.error?.message ?? currentBans.error?.message ?? sync.error?.message ?? '查詢失敗');
+      if (ranked.error || currentBans.error) setError(ranked.error?.message ?? currentBans.error?.message ?? '查詢失敗');
       else {
         setPhrases((ranked.data ?? []) as Phrase[]);
         setBans((currentBans.data ?? []) as BanRow[]);
-        setWaf((sync.data?.[0] ?? null) as WafStatus | null);
       }
       setLoading(false);
     });
@@ -95,18 +88,18 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     setBusy(true); setError(''); setNotice('');
     const { data, error: resultError } = await supabase.rpc('tunnel_admin_ban_phrase', { p_hours: hours, p_phrase: phrase.phrase, p_duration: duration });
     if (resultError) setError(resultError.message);
-    else setNotice(`已建立 ${data ?? 0} 筆 IP 封鎖。資料庫即時生效；Cloudflare 同步狀態請看上方提示。`);
+    else setNotice(`已建立 ${data ?? 0} 筆隱性 IP 限制，這些來源將一直等待而不會配對成功。`);
     await refresh();
     setBusy(false);
   }
 
   async function banIp(ip: string) {
     if (!ip || busy) return;
-    if (!window.confirm(`封鎖 IP ${ip} ${durations.find(x => x.value === duration)?.label}？\n同一網路下的其他使用者也可能無法使用聊天室。`)) return;
+    if (!window.confirm(`封鎖 IP ${ip} ${durations.find(x => x.value === duration)?.label}？\n同一 IP 的其他使用者也會無法成功配對，但不會看到封鎖提示。`)) return;
     setBusy(true); setError(''); setNotice('');
     const { data, error: resultError } = await supabase.rpc('tunnel_admin_ban_ip', { p_ip: ip, p_duration: duration, p_reason: '管理員手動封鎖' });
     if (resultError) setError(resultError.message);
-    else { setNotice(`已封鎖 ${ip}，至 ${time(String(data))}；Cloudflare 同步狀態請看上方提示。`); setManualIp(''); }
+    else { setNotice(`已對 ${ip} 啟用隱性配對限制，至 ${time(String(data))}。`); setManualIp(''); }
     await refresh(); setBusy(false);
   }
 
@@ -115,73 +108,16 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
     setBusy(true); setError(''); setNotice('');
     const { error: resultError } = await supabase.rpc('tunnel_admin_unban_ip', { p_ip: ip });
     if (resultError) setError(resultError.message);
-    else setNotice(`已解除 ${ip} 的資料庫 IP 封鎖。`);
+    else setNotice(`已解除 ${ip} 的隱性配對限制。`);
     await refresh(); setBusy(false);
-  }
-
-  async function configureWafToken(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (busy || !wafToken.trim()) return;
-    setBusy(true);
-    setError('');
-    setNotice('');
-    const { data, error: tokenError } = await supabase.rpc('tunnel_admin_configure_waf_token', {
-      p_token: wafToken.trim(),
-    });
-    if (tokenError || data !== true) {
-      setError(tokenError?.message ?? 'Cloudflare 沒有接受這組 API Token，請檢查權限。');
-    } else {
-      setWafToken('');
-      setEditWafToken(false);
-      setNotice('Cloudflare API Token 已安全存入 Supabase Vault，並成功送出黑名單同步。');
-    }
-    await refresh();
-    setBusy(false);
-  }
-
-  async function retryWafSync() {
-    if (busy) return;
-    setBusy(true);
-    setError('');
-    const { data, error: resultError } = await supabase.rpc('tunnel_admin_waf_resync');
-    if (resultError) setError(resultError.message);
-    else if (data === true) setNotice('Cloudflare 已接受 IP 清單更新，請查看同步狀態。');
-    else setNotice('Cloudflare 尚未接受同步，請查看上方授權或錯誤提示。');
-    await refresh();
-    setBusy(false);
   }
 
   return <div className={styles.root}>
     <section className={styles.noticeBox}>
-      <AlertTriangle size={19} />
       <div>
-        <strong>{waf?.configured && !waf.last_error ? 'Cloudflare WAF IP 清單已接受最近一次同步' : 'Cloudflare WAF 自動同步尚未就緒'}</strong>
-        <p>正式網址 <a href="https://chat.monsterport.com/" target="_blank" rel="noreferrer">chat.monsterport.com</a> 已有專用 Cloudflare WAF 規則；資料庫封鎖即時生效。只有 Cloudflare 成功同步後，才能在網站入口拒絕 IP。</p>
-        <p>API Token：{waf?.configured ? '已設定' : '未設定'}；有效封鎖 {waf?.active_bans ?? '—'} 筆；最近成功提交：{waf?.last_accepted_at ? time(waf.last_accepted_at) : '尚無'}。</p>
-        {waf?.last_error && <p role="status">同步提示：{waf.last_error}</p>}
-        <p>封鎖到期後由 Supabase 每分鐘同步解除。原 GitHub Pages 與 pages.dev 網址仍可能直接載入靜態檔案，但 CHAT 功能會檢查後端封鎖。</p>
-        {(!waf?.configured || editWafToken) && (
-          <form className={styles.manual} onSubmit={(event) => void configureWafToken(event)}>
-            <input
-              aria-label="Cloudflare API Token"
-              type="password"
-              autoComplete="new-password"
-              spellCheck={false}
-              value={wafToken}
-              onChange={(event) => setWafToken(event.target.value)}
-              placeholder="貼上 Account Filter Lists Edit 權限的 API Token"
-              required
-            />
-            <button type="submit" className={styles.danger} disabled={busy || wafToken.trim().length < 20}>
-              設定並驗證金鑰
-            </button>
-          </form>
-        )}
-        <p>首次啟用：到 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer">Cloudflare API Tokens</a> 建立一組僅限本帳戶「Account Filter Lists: Edit」的 Token，再直接貼到此管理頁。金鑰只寫入 Supabase Vault，不會出現在公開網頁原始碼或 GitHub。</p>
-        <button type="button" className={styles.subtle} disabled={busy} onClick={() => void retryWafSync()}><RefreshCw size={14}/>重新同步 Cloudflare</button>
-        {waf?.configured && (
-          <button type="button" className={styles.subtle} disabled={busy} onClick={() => setEditWafToken((value) => !value)}>{editWafToken ? '取消更換金鑰' : '更換 API Token'}</button>
-        )}
+        <strong>隱性 IP 配對限制</strong>
+        <p>被限制的 IP 仍可開啟網站並看到一般配對等待畫面，但伺服器不會讓該 IP 加入配對池，也不會配對給其他人。期限到期或手動解除後即可正常配對。</p>
+        <p>此功能由 Supabase 後端執行，不再使用 Cloudflare WAF 封鎖 CHAT 網站入口。</p>
       </div>
     </section>
     <section className={styles.panel}>
@@ -220,7 +156,7 @@ export function ModerationPanel({ refreshToken }: { refreshToken: number }) {
       <p className={styles.hint}>發送來源 IP 以 Supabase API 閘道轉送資訊為準。較早的訊息僅能用帳號最近一次 IP 推估，不能參與自動批次封鎖；VPN、共用網路、偽造 HTTP 標頭及地理定位服務都可能造成誤判。</p>
     </section>}
     <section className={styles.panel}>
-      <div className={styles.head}><div><h2>手動 IP 封鎖</h2><p>即使尚未出現在熱門文字，也能直接輸入固定 IP。</p></div></div>
+      <div className={styles.head}><div><h2>手動 IP 封鎖</h2><p>可輸入固定 IP，讓來源維持一般等待畫面但不會配對成功。</p></div></div>
       <form className={styles.manual} onSubmit={event => {event.preventDefault();void banIp(manualIp.trim());}}>
         <input aria-label="要封鎖的 IP" placeholder="輸入 IPv4 或 IPv6，例如 203.0.113.1" value={manualIp} onChange={e => setManualIp(e.target.value)} />
         <button className={styles.danger} disabled={busy || !manualIp.trim()} type="submit"><ShieldOff size={16}/>封鎖此 IP</button>
