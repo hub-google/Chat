@@ -4,20 +4,18 @@ import React, { useEffect, useState } from 'react';
 import { UserHUD } from '../components/UserHUD';
 import { ChatWindow } from '../components/ChatWindow';
 import { ensureUser } from '../lib/user';
-import { supabase } from '../lib/supabase';
 
 export default function Home() {
-  const [authState, setAuthState] = useState<'loading' | 'ready' | 'error' | 'blocked'>('loading');
+  const [authState, setAuthState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [authError, setAuthError] = useState('');
 
   useEffect(() => {
     let active = true;
     ensureUser()
-      .then(async () => {
-        const { data: allowed, error } = await supabase.rpc('tunnel_access_allowed');
-        if (error) throw new Error(`使用權限確認失敗：${error.message}`);
+      .then(() => {
         if (!active) return;
-        setAuthState(allowed === true ? 'ready' : 'blocked');
+        // IP moderation is intentionally not exposed in the lobby.
+        setAuthState('ready');
       })
       .catch((error: unknown) => {
         if (!active) return;
@@ -32,7 +30,7 @@ export default function Home() {
       <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
         <div role={authState === 'error' ? 'alert' : 'status'} style={{ maxWidth: 520, textAlign: 'center' }}>
           <h1>Tunnel</h1>
-          <p>{authState === 'loading' ? '正在建立安全匿名連線…' : authState === 'blocked' ? '目前所在網路 IP 已被暫時封鎖，無法使用聊天室。' : authError}</p>
+          <p>{authState === 'loading' ? '正在建立安全匿名連線…' : authError}</p>
           {authState === 'error' && (
             <button onClick={() => window.location.reload()} style={{ padding: '10px 18px', cursor: 'pointer' }}>
               重新連線
