@@ -317,7 +317,7 @@ export function ChatWindow() {
             rtcManager.current?.close();
             setConnectionState('fallback');
             setPeerLeft(true);
-            setNotice('此 IP 已被管理員暫時封鎖，無法繼續聊天。');
+            setNotice('連線已中斷，請重新尋找聊天對象。');
             return;
           }
           if (data.is_taken_over && !takeoverRole.current) {
