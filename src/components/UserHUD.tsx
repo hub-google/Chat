@@ -177,9 +177,7 @@ export function UserHUD() {
       const fingerprint = await generateDeviceFingerprint();
       const userId = await getUserId();
       userIdRef.current = userId;
-      const { data: allowed, error: accessError } = await supabase.rpc('tunnel_access_allowed');
-      if (accessError) throw new Error(`無法檢查使用權限：${accessError.message}`);
-      if (allowed !== true) throw new Error('此 IP 已被管理員暫時封鎖，禁止進入聊天室。');
+      // Matching authorization happens privately in the server RPC.
       const ipLocation = await getIpLocation();
 
       let lat = null;
