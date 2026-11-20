@@ -47,7 +47,6 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_IMGBB_API_KEY: ${{ secrets.NEXT_PUBLIC_IMGBB_API_KEY }}
-          NEXT_PUBLIC_RECAPTCHA_SITE_KEY: ${{ secrets.NEXT_PUBLIC_RECAPTCHA_SITE_KEY }}
           NEXT_PUBLIC_IMGBB_UPLOAD_URL: 'https://api.imgbb.com/1/upload'
       - name: Check optional image-upload configuration
         env:
@@ -57,15 +56,6 @@ jobs:
             echo 'ImgBB upload key configured for main test build.'
           else
             echo '::warning::NEXT_PUBLIC_IMGBB_API_KEY is missing; image uploading will be unavailable.'
-          fi
-      - name: Check Google reCAPTCHA site key presence
-        env:
-          NEXT_PUBLIC_RECAPTCHA_SITE_KEY: ${{ secrets.NEXT_PUBLIC_RECAPTCHA_SITE_KEY }}
-        run: |
-          if [ -n "$NEXT_PUBLIC_RECAPTCHA_SITE_KEY" ]; then
-            echo 'Google reCAPTCHA site key is configured for main test build.'
-          else
-            echo '::warning::NEXT_PUBLIC_RECAPTCHA_SITE_KEY is absent; CHAT reCAPTCHA cannot be enabled until keys are provided.'
           fi
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
