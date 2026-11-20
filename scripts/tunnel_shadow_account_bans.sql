@@ -96,14 +96,16 @@ RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO ''
 AS $$
+DECLARE v_deleted integer;
 BEGIN
   IF (SELECT auth.uid()) IS NULL OR NOT public.is_admin() THEN
     RAISE EXCEPTION 'Administrator required' USING ERRCODE='42501';
   END IF;
   DELETE FROM private.tunnel_account_bans WHERE user_id=p_user_id;
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
   UPDATE public.profiles SET status='offline',updated_at=now()
     WHERE id=p_user_id AND status='banned';
-  RETURN FOUND;
+  RETURN v_deleted > 0;
 END;
 $$;
 REVOKE ALL ON FUNCTION public.tunnel_admin_unban_user(uuid) FROM PUBLIC, anon, authenticated;
