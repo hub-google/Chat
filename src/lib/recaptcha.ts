@@ -46,6 +46,17 @@ function googleCaptcha(siteKey: string): Promise<CaptchaApi> {
 export async function ensureChatRecaptcha(userId: string): Promise<void> {
   if (passedUser === userId && Date.now() < passedUntil) return;
 
+  // Only the GitHub Pages main test site opts in to the server-enforced
+  // CAPTCHA cohort. Release users are not enrolled until global activation.
+  if (window.location.hostname === 'hub-google.github.io' &&
+      window.location.pathname.startsWith('/Chat')) {
+    const { error: enrollmentError } =
+      await supabase.rpc('tunnel_chat_recaptcha_test_enroll');
+    if (enrollmentError) {
+      throw new Error(`無法啟用測試版人機驗證：${enrollmentError.message}`);
+    }
+  }
+
   const { data: state, error: statusError } = await supabase.rpc('tunnel_chat_recaptcha_status');
   if (statusError) throw new Error(`人機驗證狀態查詢失敗：${statusError.message}`);
   if (!state?.required) return;
