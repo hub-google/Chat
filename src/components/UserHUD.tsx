@@ -167,7 +167,7 @@ export function UserHUD() {
   const handleStartMatching = async () => {
     const lastMatchTime = localStorage.getItem('tunnel:last_match_time');
     if (lastMatchTime && Date.now() - parseInt(lastMatchTime, 10) < 5000) {
-      setErrorMsg('配對頻率過高（安全防護限制），請等候 5 秒再試。');
+      setErrorMsg('請稍候幾秒後再重新尋找。');
       return;
     }
     setStatus('waiting');
