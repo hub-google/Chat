@@ -120,6 +120,7 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 2. 公開**網站金鑰**：在 GitHub repo Secrets 設定 `NEXT_PUBLIC_RECAPTCHA_SITE_KEY`，供 main 測試版靜態建置；正式 release 使用 Cloudflare Pages 同名建置環境變數。網站金鑰本來就是公開值，不是私密憑證。
 3. **私密金鑰**：在 Supabase Dashboard → Edge Functions → Secrets 設定 `CHAT_RECAPTCHA_SECRET_KEY`，不能放前端或 GitHub 網頁程式碼。Edge Function `chat-recaptcha-verify` 已部署並開啟 JWT 驗證，使用 Google `siteverify`、要求 `action=chat_match`、分數至少 0.5、驗證 hostname 與一次性 Token，成功才存入僅後端可寫的私有通行紀錄。
 4. **驗收後才開啟**：在 Supabase SQL Editor 執行 `UPDATE private.tunnel_recaptcha_config SET enabled=true WHERE singleton;`。未設定金鑰或未驗收時請保持 `enabled=false`，否則會阻斷所有正常使用者配對。要停用只改成 `enabled=false`，不須更動其他專案。
-5. 初次配對背景執行 Google 驗證，成功後通行 12 小時；短時間快速換人不會每次重新做人機驗證。配對 API 對缺少有效後端憑證者直接拒絕，繞過網頁也無法配對。
+5. \`scripts/tunnel_lock_down_direct_queue_writes.sql\` 將一般使用者對 \`matching_pool\` 的直接 INSERT／UPDATE 權限關閉，只有後端原子配對 RPC 能寫入等待名單，避免腳本繞過 CAPTCHA。一般使用者仍可查詢或取消自己的等待紀錄。
+6. 初次配對背景執行 Google 驗證，成功後通行 12 小時；短時間快速換人不會每次重新做人機驗證。配對 API 對缺少有效後端憑證者直接拒絕，繞過網頁也無法配對。
 
 安全界限：原生匿名帳號建立仍由 Supabase Auth 執行，**這項 Google 防護保護 CHAT 配對，不阻止直接建立匿名帳號**。如果後續需要限制匿名註冊量，要另採共享 Auth 專案相容的防護機制，不應直接全域啟用或覆蓋 Supabase Auth Hook。已有 IP 隱性封鎖優先於 reCAPTCHA 檢查，仍回傳普通等待結果，避免暴露封鎖狀態。
