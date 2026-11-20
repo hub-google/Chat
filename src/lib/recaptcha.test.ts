@@ -42,6 +42,20 @@ describe('CHAT Google reCAPTCHA v3', () => {
     });
   });
 
+  it('prefers the public site key from Supabase rather than GitHub Secrets', async () => {
+    vi.mocked(supabase.rpc).mockResolvedValue({
+      data: { required: true, verified: false, site_key: 'server-side-public-site-key' },
+      error: null,
+    } as never);
+    vi.mocked(supabase.functions.invoke).mockResolvedValue({
+      data: { verified: true }, error: null,
+    } as never);
+    const execute = vi.fn().mockResolvedValue('valid-recaptcha-test-token');
+    window.grecaptcha = { ready: (fn) => fn(), execute };
+    await ensureChatRecaptcha('vault-configured-user');
+    expect(execute).toHaveBeenCalledWith('server-side-public-site-key', { action: 'chat_match' });
+  });
+
   it('rejects failed Google/backend verification', async () => {
     vi.mocked(supabase.rpc).mockResolvedValue({ data: { required: true, verified: false }, error: null } as never);
     vi.mocked(supabase.functions.invoke).mockResolvedValue({ data: { verified: false }, error: null } as never);
