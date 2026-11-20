@@ -164,5 +164,6 @@ try {
   socket?.close();
   chrome?.kill('SIGTERM');
   await new Promise((resolve) => server.close(resolve));
-  fs.rmSync(dir, { recursive: true, force: true });
+  // Chrome may still be releasing profile files after SIGTERM; retry ENOTEMPTY.
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
