@@ -28,8 +28,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const url = Deno.env.get("SUPABASE_URL");
   const anon = Deno.env.get("SUPABASE_ANON_KEY");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const recaptchaSecret = Deno.env.get("CHAT_RECAPTCHA_SECRET_KEY");
-  if (!url || !anon || !serviceKey || !recaptchaSecret) {
+  if (!url || !anon || !serviceKey) {
     return respond(503, { error: "Google reCAPTCHA server configuration incomplete" }, origin);
   }
   const bearer = req.headers.get("authorization") ?? "";
@@ -47,6 +46,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   try {
+    // Fetch the encrypted Google secret from Supabase Vault, via a
+    // service_role-only RPC. Never send the secret back to a browser.
+    const admin = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data: storedSecret, error: vaultError } =
+      await admin.rpc("tunnel_chat_recaptcha_get_secret");
+    const recaptchaSecret = typeof storedSecret === "string" ? storedSecret
+      : Deno.env.get("CHAT_RECAPTCHA_SECRET_KEY");
+    if (vaultError || !recaptchaSecret) {
+      return respond(503, { error: "Google reCAPTCHA server configuration incomplete" }, origin);
+    }
     const result = await fetch("https://www.google.com/recaptcha/api/siteverify", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -72,9 +83,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return respond(403, { error: "Human verification failed" }, origin);
     }
 
-    const admin = createClient(url, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
     const { error: saveError } = await admin.rpc("tunnel_chat_recaptcha_mark_verified", {
       p_user_id: user.id,
       p_score: verification.score,
