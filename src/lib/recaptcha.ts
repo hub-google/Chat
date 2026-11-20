@@ -52,7 +52,8 @@ export async function ensureChatRecaptcha(userId: string): Promise<void> {
     return;
   }
 
-  const siteKey = env.RECAPTCHA_SITE_KEY;
+  // Site keys are public; read from CHAT-only Supabase config, not GitHub Secrets.
+  const siteKey = (typeof state.site_key === 'string' ? state.site_key : '') || env.RECAPTCHA_SITE_KEY;
   if (!siteKey) throw new Error('Google reCAPTCHA 尚未設定網站金鑰，暫時無法開始配對。');
 
   const api = await googleCaptcha(siteKey);
