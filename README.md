@@ -47,7 +47,7 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 
 ## 2026-11-17 進一步修正
 
-- 使用者封鎖由 `tunnel_admin_ban_user` 原子 RPC 執行；封鎖時同步關閉進行中的對話與等待佇列。既有正式資料庫的 `profiles_status_check` 已納入 `banned`，與主 SQL 定義一致。
+- 使用者封鎖由 `tunnel_admin_ban_user` 原子 RPC 執行；封鎖時同步關閉進行中的對話與等待佇列。**2026-11-20 起改為私有帳號隱性限制表，不再把 `profiles.status='banned'` 當成封鎖依據，請以最新章節為準。**
 - 管理員「結束接管」改為實際終止聊天室，避免後台畫面結束但資料庫仍保持接管狀態。
 - 重整配對頁不會還原不可恢復的 `waiting` 狀態；進行中聊天室依既有 ID 驗證後恢復。
 - 管理後台的檢舉數現在依統計期間篩選。
@@ -69,9 +69,9 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 - 封鎖：單一 IP 或該句話所有已知來源 IP。可選 5 分鐘、30 分鐘、1／6／24 小時、7／30 天、1 年、10 年。管理員自己的目前來源 IP 不會被批次封鎖。封鎖延長或提早解除皆在私有資料表留下紀錄。
 - 資料庫部署：執行 `scripts/tunnel_phrase_ip_moderation.sql`（已套用到現有 Supabase 專案，請勿重複套用於其他共用專案）。只有受權限保護的 RPC 可以查詢與修改 IP 黑名單。
 - 每則新訊息由 PostgreSQL trigger 記錄 PostgREST 轉送的來源 IP 快照；早期訊息因沒有快照，僅能使用個人資料中最近一次 IP 推估。IP 地點可能不精準到區，裝置／瀏覽器可被用戶端偽造，勿作為唯一處罰證據。
-- 資料庫封鎖由 `expires_at > now()` 即時判定，到期自動失效；Cloudflare 網站入口封鎖另使用每分鐘一筆 Supabase pg_cron 同步，沒有 Cloudflare Workers。被封鎖者的配對、訊息寫入和訊號交換受 RLS／RPC 阻擋；首頁有拒絕畫面，聊天中每 5 秒檢查權限並關閉 P2P 通道。
+- IP 封鎖由 `expires_at > now()` 即時判定，到期自動失效；配對被限制時仍顯示正常等待頁，不出現入口拒絕畫面。聊天室每 5 秒檢查連線狀態，必要時以一般連線中斷訊息關閉 P2P。
 
-**網站入口限制：** 已在 Cloudflare 上建立 `chat.monsterport.com` 及專屬 WAF 規則，規則只影響 CHAT 網域。同步清單的 Postgres 函式與 1 分鐘 pg_cron 已設定，但**Cloudflare API Token 未提供前 WAF IP 清單不會隨後台變更更新**，後台會顯示同步狀態。GitHub Pages 與 Pages 原始 `*.pages.dev` 靜態 HTML 仍可取得；已加入客戶端導向正式網域，且 Supabase 後端持續阻止遭封鎖 IP 操作。不能以此宣稱原始靜態資產完全不可繞過。
+**網站入口限制：** 原 Cloudflare CHAT 專用封鎖 WAF 規則已停用（2026-11-20 透過 Cloudflare API 再次確認 `enabled=false`）；現行限制由 Supabase 後端配對 RPC 執行，網頁入口不因 CHAT 帳號／IP 封鎖而拒絕存取。
 
 ## HTTP 控制流量優化與驗證
 
@@ -86,12 +86,12 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 ## CHAT Cloudflare 靜態站與入口 WAF（2026-11-18）
 
 - 正式域名：`https://chat.monsterport.com`；DNS 是橘雲代理 CNAME `monsterport-chat.pages.dev`，Pages 專案 `monsterport-chat` 只由 GitHub `hub-google/Chat` 的 `release` 正式分支建置（Next.js `output: export`，無 Cloudflare Workers、Pages Functions）。
-- WAF：Cloudflare 區域 `monsterport.com` 的 `http_request_firewall_custom`，只有一條 `(http.host eq "chat.monsterport.com" and ip.src in $chat_blocked_ips)` 規則；Cloudflare 帳戶的免費 IP list `chat_blocked_ips` 最多 10,000 筆。其他子網域不受影響。
-- 私有同步：`scripts/tunnel_waf_sync.sql` 將 PostgreSQL `http` extension 安裝於 `private` schema；BAN／解 BAN 觸發 `private.tunnel_waf_sync()`，`tunnel-waf-expiry-sync` 每分鐘核對一次到期名單；使用 HTTPS 呼叫 Cloudflare List API。原始憑證只從 Supabase Vault 讀取，絕不交給瀏覽器。
-- **尚待憑證啟用：** 在 Cloudflare 建立僅對本帳戶授權 **Account / Account Filter Lists / Edit** 的 API Token，登入 `https://chat.monsterport.com/admin/moderation/`，在後台的「Cloudflare API Token」密碼欄貼上並按「設定並驗證金鑰」。只有成功呼叫 Cloudflare IP List API 的 Token 才會被保留在 Supabase Vault，使用 `tunnel_admin_configure_waf_token` 守護；**不要把 Token 提交 GitHub、貼入聊天或放入前端建置環境**。缺金鑰時資料庫 BAN 仍生效，但 WAF 不會跟著更新。
-- API Token 對應帳戶 ID `2374fd4a241005b20563b35af3bdc320`、清單 ID `debd9fd18dda49219c2b11cc56773c53`；只有 Cloudflare Account Filter Lists 的寫入權限是必要的，不需管理其他 WAF 規則或整個帳戶。
+- WAF（歷史設計）：`(http.host eq "chat.monsterport.com" and ip.src in $chat_blocked_ips)` 規則已停用，避免顯示 CHAT 專用封鎖頁。
+- `scripts/tunnel_waf_sync.sql` 僅保留為歷史紀錄；2026-11-19 的 `scripts/tunnel_shadow_ip_matching.sql` 已移除 WAF 同步觸發器並停用對應 pg_cron。**不得重新啟動入口硬封鎖。**
+- 現行隱性配對限制不需要 Cloudflare WAF API Token；管理員在 CHAT 後台封鎖 IP 即由資料庫立即生效。
+- 如需恢復傳統入口封鎖，須先重新審查產品規格；**目前禁止為 CHAT 重新啟用硬封鎖**。
 - Cloudflare Pages 由獨立環境建置；圖片上傳使用的公開 ImgBB API key 如未設定到此 Pages 專案，該站圖片上傳會不可用。不要把此欄位誤當成私有 API Token。
-- 封鎖到期精度：Postgres RLS 即刻依到期時間放行；Cloudflare WAF 每分鐘更新，通常落後不到 1 分鐘，但網路失敗會造成更久延遲。管理後台顯示最後成功提交時間及錯誤。
+- IP 限制到期由 PostgreSQL 即時判定，不受 Cloudflare 同步狀態影響。
 
 
 ## 2026-11-18 部署規範（以此為準）
@@ -129,4 +129,14 @@ Supabase 設定：開啟 Anonymous Sign-Ins，將 `NEXT_PUBLIC_SUPABASE_URL` 與
 
 對現有 Supabase 套用 `scripts/tunnel_recaptcha_vault_configuration.sql`（已套用）。已授權工具可將 Google v3 金鑰直接安全寫入 Supabase Vault，無需 GitHub Actions Secret 寫入權限。Google reCAPTCHA 管理台必須確認金鑰類型為 v3（若為 Enterprise-only 金鑰，必須另行改用 Enterprise Assessments API）。
 
-目前沒有找到既有 Google 私密金鑰，**不得以假值啟用驗證**；不應將金鑰顯示於對話、提交至 GitHub 或存於普通資料表。只有取得真正金鑰、確認授權域名並執行 Google siteverify 成功，才可將資料庫 `enabled` 改為 true。
+2026-11-20 已確認 Google 網站金鑰存在、私密金鑰儲存在 Supabase Vault、`chat-recaptcha-verify` Edge Function 已部署；全站 `enabled=false`，測試帳號需先通過實際驗收才能全面啟用。絕不可顯示或提交私密金鑰。
+
+
+## 2026-11-20 帳號／IP 一致的隱性配對限制（最新規則）
+
+- **一律 Shadow Ban**：遭帳號限制、手動 IP 限制、或重複文字批次 IP 限制者均可正常進入網站、編輯大廳資料並按「開始配對」，只看到一般等待畫面；後端 `fn_match_user` 回傳普通無配對結果，且不建立有效等待池紀錄，其他真人也不會選到受限制者。使用者沒有「封鎖」通知或入口封鎖頁。
+- **帳號限制已改用後端私有表** `private.tunnel_account_bans`，不再依賴可被用戶端更新的 `profiles.status`。管理員 `tunnel_admin_ban_user` 將帳號寫入私有表，清除等待池並以普通 `user_left` 原因終止進行中的聊天室；對外個人狀態不顯示 `banned`。解除帳號限制可使用管理員 RPC `tunnel_admin_unban_user`，不能由一般使用者直接呼叫。
+- `public.is_banned()` 現在會同時判定私有帳號限制及 IP 限制，保留既有 RLS 與聊天連線管制。被限制者 `tunnel_chat_recaptcha_status` 不會要求額外 Google CAPTCHA，以免先出現可辨識的驗證失敗訊息。
+- **套用紀錄**：`scripts/tunnel_shadow_account_bans.sql` 已套用至現有 CHAT 使用的共用 Supabase 專案；資料表封鎖紀錄不開放 `anon` 或 `authenticated` 存取。新安裝環境須先套用既有配對/IP/reCAPTCHA migration 再套用本檔。
+- **測試**：已在正式共用資料庫執行交易式回滾測試，涵蓋管理員封鎖／解封、帳號遭封後修改 `profiles.status` 仍無法解封、IP 封鎖、無配對結果、等待池未寫入、受限者不出現 CAPTCHA 要求。測試資料已回滾。
+- **安全界限**：雖不提供前端提示，高技術使用者仍可能透過 API 差異或長時間無配對推測受限制；不能承諾無法以任何技術手段察覺。此規則只影響 CHAT 既有帳號/IP；裝置指紋目前只記錄，尚未實作裝置級封鎖。
