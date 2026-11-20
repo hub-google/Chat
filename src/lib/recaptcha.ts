@@ -11,11 +11,15 @@ declare global {
 
 const ACTION = 'chat_match';
 let loadPromise: Promise<CaptchaApi> | null = null;
+let loadedSiteKey: string | null = null;
 let passedUser: string | null = null;
 let passedUntil = 0;
 
 function googleCaptcha(siteKey: string): Promise<CaptchaApi> {
-  if (loadPromise) return loadPromise;
+  // The public site key can be rotated in Supabase without rebuilding the site.
+  // Never reuse an in-memory token loader for a different configured key.
+  if (loadPromise && loadedSiteKey === siteKey) return loadPromise;
+  loadedSiteKey = siteKey;
   loadPromise = new Promise<CaptchaApi>((resolve, reject) => {
     function ready() {
       const api = window.grecaptcha;
