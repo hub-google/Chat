@@ -6,6 +6,7 @@ import { useMatchStore } from '../store/matchStore';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { supabase } from '../lib/supabase';
 import * as fingerprint from '../lib/fingerprint';
+import { ensureChatRecaptcha } from '../lib/recaptcha';
 
 // Mock Supabase
 vi.mock('../lib/supabase', () => ({
@@ -34,6 +35,7 @@ vi.mock('../lib/fingerprint', () => ({
   generateDeviceFingerprint: vi.fn(),
 }));
 vi.mock('../lib/ipLocation', () => ({ getIpLocation: vi.fn().mockResolvedValue(null) }));
+vi.mock('../lib/recaptcha', () => ({ ensureChatRecaptcha: vi.fn().mockResolvedValue(undefined) }));
 
 // Mock Geolocation
 const mockGeolocation = {
@@ -87,6 +89,7 @@ describe('UserHUD', () => {
     await waitFor(() => {
       expect(fingerprint.generateDeviceFingerprint).toHaveBeenCalled();
       expect(supabase.auth.getUser).toHaveBeenCalled();
+      expect(ensureChatRecaptcha).toHaveBeenCalledWith('mock-user-123');
       expect(mockGeolocation.getCurrentPosition).toHaveBeenCalled();
     });
 
