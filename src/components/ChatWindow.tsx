@@ -216,7 +216,7 @@ export function ChatWindow() {
            .single();
          const isTakenOverUser = matchData?.is_taken_over && matchData.takeover_target === userId;
          if (matchError || (!matchData?.participants?.includes(userId) && !isTakenOverUser)) {
-           setNotice(`無法讀取聊天室：${matchError?.message ?? '您不是此聊天室的成員'}`);
+           setNotice('連線已中斷，請重新尋找聊天對象。');
            reset();
            return;
          }
@@ -264,7 +264,7 @@ export function ChatWindow() {
       };
       void setupRTC().catch((error: unknown) => {
         setConnectionState('fallback');
-        setNotice(error instanceof Error ? error.message : 'P2P 連線失敗，已切換資料庫通道。');
+        setNotice('連線暫時不穩定，已切換備援模式。');
       });
 
       void getUserId().then(async (userId) => {
@@ -287,7 +287,7 @@ export function ChatWindow() {
           .order('created_at', { ascending: false })
           .limit(100);
           if (error) {
-            setNotice(`載入歷史訊息失敗：${error.message}`);
+            setNotice('暫時無法載入歷史訊息。');
             return;
           }
           const history: Message[] = (data ?? []).reverse().filter((row) => !(row.type === 'system' && row.content?.includes('備用安全通道'))).map((row) => ({
@@ -335,7 +335,7 @@ export function ChatWindow() {
           } else if (data.is_active !== true) {
             rtcManager.current?.close();
             setPeerLeft(true);
-            setNotice('聊天室已結束或無法再存取。');
+            setNotice('對方已離開聊天室。');
           }
         } finally {
           controlPollRunning = false;
