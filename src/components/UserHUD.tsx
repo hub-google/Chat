@@ -7,6 +7,7 @@ import { Search } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { generateDeviceFingerprint } from '../lib/fingerprint';
 import { getUserId } from '../lib/user';
+import { ensureChatRecaptcha } from '../lib/recaptcha';
 import { getIpLocation } from '../lib/ipLocation';
 import { getClientDeviceDetails } from '../lib/clientDevice';
 
@@ -177,7 +178,12 @@ export function UserHUD() {
       const fingerprint = await generateDeviceFingerprint();
       const userId = await getUserId();
       userIdRef.current = userId;
-      // Matching authorization happens privately in the server RPC.
+      // First match in each session gets a Google-verified backend proof.
+      // Re-matches are instant while the proof remains valid; only CHAT uses this.
+      setLoadingMsg('正在進行安全驗證...');
+      await ensureChatRecaptcha(userId);
+      if (useMatchStore.getState().status !== 'waiting') return;
+      // Matching authorization (including shadow bans and CAPTCHA) lives in the RPC.
       const ipLocation = await getIpLocation();
 
       let lat = null;
